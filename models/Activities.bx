@@ -65,6 +65,42 @@ class {
 		return rows.len() ? rows[ 1 ].Id : "";
 	}
 
+	/**
+	 * The newest stored activity of one of these types about objectUrl, as
+	 * { id, type, json, createdAt }, or null.
+	 */
+	function latestFor( required string objectUrl, required array types ) {
+		var rows = queryExecute(
+			"SELECT BIN_TO_UUID(Id) AS Id, Type, Json, CreatedAt FROM ApActivity
+			 WHERE ObjectUrl = :objectUrl AND Type IN (:types)
+			 ORDER BY CreatedAt DESC LIMIT 1",
+			{
+				objectUrl : { value : objectUrl, sqltype : "varchar" },
+				types     : { value : types, sqltype : "varchar", list : true }
+			},
+			{ datasource : variables.datasource, returntype : "array" }
+		);
+		if ( !rows.len() ) {
+			return javacast( "null", "" );
+		}
+		return { id : rows[ 1 ].Id, type : rows[ 1 ].Type, json : rows[ 1 ].Json, createdAt : rows[ 1 ].CreatedAt };
+	}
+
+	/**
+	 * Object URLs under urlPrefix that have been created and not since deleted.
+	 */
+	array function federatedObjectUrls( required string urlPrefix ) {
+		return queryExecute(
+			"SELECT ObjectUrl FROM ApActivity
+			 WHERE ObjectUrl LIKE :prefix AND Type IN ('Create', 'Delete')
+			 GROUP BY ObjectUrl
+			 HAVING SUM(Type = 'Create') > 0 AND SUM(Type = 'Delete') = 0
+			 ORDER BY ObjectUrl",
+			{ prefix : { value : replace( urlPrefix, "%", "\%", "all" ) & "%", sqltype : "varchar" } },
+			{ datasource : variables.datasource, returntype : "array" }
+		).map( ( row ) => row.ObjectUrl );
+	}
+
 	private string function objectUrlOf( required struct activity ) {
 		var obj = activity.object ?: "";
 		return isSimpleValue( obj ) ? obj : ( obj.id ?: "" );

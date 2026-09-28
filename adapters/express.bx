@@ -91,6 +91,9 @@ class {
 		if ( isNull( doc ) ) {
 			return res.status( 404 ).type( "text/plain" ).send( "not found" );
 		}
+		if ( doc.type == "Tombstone" ) {
+			res.status( 410 );
+		}
 		return sendActivityJson( res, doc );
 	}
 

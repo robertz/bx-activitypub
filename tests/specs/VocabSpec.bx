@@ -46,6 +46,29 @@ class extends="testbox.system.BaseSpec" {
 				expect( article.keyExists( "@context" ) ).toBeTrue();
 			} );
 
+			it( "builds an Update carrying the object's addressing, or followers for an actor", () => {
+				var article = { id : "https://s.example/post/1", type : "Article", to : [ "p" ], cc : [ "f" ], "@context" : "x" };
+				var update  = vocab.update( "https://s.example/activities/update/1", "https://s.example/u/robert", article );
+				expect( update.type ).toBe( "Update" );
+				expect( update.to ).toBe( [ "p" ] );
+				expect( update.cc ).toBe( [ "f" ] );
+				expect( update.object.keyExists( "@context" ) ).toBeFalse();
+
+				var person = vocab.update( "https://s.example/activities/update/2", "https://s.example/u/robert", { id : "https://s.example/u/robert", type : "Person" }, "https://s.example/u/robert/followers" );
+				expect( person.to ).toBe( [ "https://www.w3.org/ns/activitystreams##Public" ] );
+				expect( person.cc ).toBe( [ "https://s.example/u/robert/followers" ] );
+			} );
+
+			it( "builds a Delete of a Tombstone and a served Tombstone", () => {
+				var del = vocab.delete( "https://s.example/activities/delete/1", "https://s.example/u/robert", "https://s.example/post/1", "https://s.example/u/robert/followers" );
+				expect( del.type ).toBe( "Delete" );
+				expect( del.object ).toBe( { id : "https://s.example/post/1", type : "Tombstone" } );
+				var tomb = vocab.tombstone( "https://s.example/post/1", "Article", parseDateTime( "2026-09-28T12:00:00Z" ) );
+				expect( tomb.type ).toBe( "Tombstone" );
+				expect( tomb.formerType ).toBe( "Article" );
+				expect( tomb.deleted ).toBe( "2026-09-28T12:00:00Z" );
+			} );
+
 			it( "formats dates as whole-second UTC", () => {
 				expect( vocab.isoDate( parseDateTime( "2026-09-28T12:00:00.789Z" ) ) ).toBe( "2026-09-28T12:00:00Z" );
 			} );

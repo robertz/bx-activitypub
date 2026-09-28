@@ -46,6 +46,27 @@ class implements="contracts.IHostApp" {
 		return !variables.PRIVATE_IDS.contains( id );
 	}
 
+	// ---- test controls: specs mutate the host to simulate edits, unpublishing and deletion
+
+	void function putPost( required string id, required struct post ) {
+		variables.POSTS[ id ] = post;
+	}
+
+	void function removePost( required string id ) {
+		structDelete( variables.POSTS, id );
+	}
+
+	void function setPublic( required string id, required boolean visible ) {
+		arrayDelete( variables.PRIVATE_IDS, id );
+		if ( !visible ) {
+			variables.PRIVATE_IDS.append( id );
+		}
+	}
+
+	void function setActorField( required string type, required string name, required string field, required any value ) {
+		variables.ACTORS[ type ][ name ][ field ] = value;
+	}
+
 	string function baseUrl() {
 		return "https://site.example";
 	}

@@ -52,7 +52,7 @@ class {
 	/**
 	 * Author mode: sends Create{Article} for a post to its author's followers.
 	 * Returns { activityId, queued, alreadyPublished }. Publishing a post that already has a
-	 * Create is a no-op; changes to it go out as Update.
+	 * Create is a no-op; changes to it go out through syncPost().
 	 */
 	struct function publishPost( required string postId ) {
 		if ( isNull( variables.host.getObject( "post", postId ) ) ) {
@@ -73,35 +73,102 @@ class {
 			return { activityId : existing, queued : 0, alreadyPublished : true };
 		}
 
-		var actorUrl = variables.actors.actorUrl( "Person", author.name );
-		var uuid     = variables.activities.newId();
-		variables.activities.store( uuid, variables.vocab.create( variables.activities.urlFor( "Create", uuid ), actorUrl, article ) );
-
-		var inboxes = variables.followers.deliveryInboxes( "Person", author.id );
-		var keyId   = variables.actors.keyId( "Person", author.name );
-		for ( var inbox in inboxes ) {
-			variables.delivery.enqueue( uuid, "Person", author.id, keyId, inbox );
-		}
-		writeLog( text = "published #article.id# as Create #uuid# to #inboxes.len()# inbox(es)", type = "information", log = "activitypub" );
-		return { activityId : uuid, queued : inboxes.len(), alreadyPublished : false };
+		var uuid = variables.activities.newId();
+		variables.activities.store( uuid, variables.vocab.create( variables.activities.urlFor( "Create", uuid ), article.attributedTo, article ) );
+		var queued = sendToFollowers( uuid, "Person", author );
+		writeLog( text = "published #article.id# as Create #uuid# to #queued# inbox(es)", type = "information", log = "activitypub" );
+		return { activityId : uuid, queued : queued, alreadyPublished : false };
 	}
 
 	/**
-	 * The ActivityPub document for a local object (kind "post"), or null.
+	 * Brings followers' copy of a post in line with the host, whatever changed:
+	 *   public, never sent                         -> Create
+	 *   public, sent, title/summary/content/url changed -> Update
+	 *   sent, now not public or gone from the host -> Delete (Tombstone)
+	 * Returns { action ("create" | "update" | "delete" | "none"), activityId, queued }.
+	 * Safe to call repeatedly: an unchanged post sends nothing. A deleted post's id stays
+	 * deleted even if the post becomes public again (Mastodon refuses to recreate an id).
+	 */
+	struct function syncPost( required string postId ) {
+		var objectUrl = variables.actors.objectUrl( "post", postId );
+		var last      = variables.activities.latestFor( objectUrl, [ "Create", "Update", "Delete" ] );
+		var post      = publicPost( postId );
+		var author    = isNull( post ) ? javacast( "null", "" ) : variables.actors.findActor( "Person", post.author );
+
+		if ( isNull( author ) ) {
+			return isNull( last ) || last.type == "Delete" ? noAction() : deletePost( postId, last );
+		}
+		if ( isNull( last ) ) {
+			var created = publishPost( postId );
+			return { action : "create", activityId : created.activityId, queued : created.queued };
+		}
+		if ( last.type == "Delete" ) {
+			return noAction();
+		}
+
+		var article = buildArticle( postId, post, author );
+		if ( !articleChanged( article, jsonDeserialize( last.json ).object ) ) {
+			return noAction();
+		}
+		article[ "updated" ] = variables.vocab.isoDate( now() );
+		var uuid = variables.activities.newId();
+		variables.activities.store( uuid, variables.vocab.update( variables.activities.urlFor( "Update", uuid ), article.attributedTo, article ) );
+		var queued = sendToFollowers( uuid, "Person", author );
+		writeLog( text = "updated #objectUrl# as Update #uuid# to #queued# inbox(es)", type = "information", log = "activitypub" );
+		return { action : "update", activityId : uuid, queued : queued };
+	}
+
+	/**
+	 * Post ids (kind "post") that have been created on the fediverse and not deleted, so a
+	 * host sweep can revisit posts that have since gone private or been removed.
+	 */
+	array function federatedPostIds() {
+		var prefix = variables.actors.objectUrl( "post", "" );
+		return variables.activities.federatedObjectUrls( prefix ).map( ( objectUrl ) => mid( objectUrl, len( prefix ) + 1, len( objectUrl ) ) );
+	}
+
+	/**
+	 * Sends Update{actor} when the actor's public profile (name, bio, avatar, url) differs
+	 * from the last one sent; the first call always sends. Returns { action, activityId, queued }.
+	 */
+	struct function syncActor( required string type, required string name ) {
+		var actor = variables.actors.findActor( type, name );
+		if ( isNull( actor ) ) {
+			return noAction();
+		}
+		var doc  = variables.actors.document( type, name );
+		var last = variables.activities.latestFor( doc.id, [ "Update" ] );
+		if ( !isNull( last ) && !profileChanged( doc, jsonDeserialize( last.json ).object ) ) {
+			return noAction();
+		}
+		var uuid = variables.activities.newId();
+		variables.activities.store( uuid, variables.vocab.update( variables.activities.urlFor( "Update", uuid ), doc.id, doc, doc.followers ) );
+		var queued = sendToFollowers( uuid, type, actor );
+		writeLog( text = "profile of #doc.id# sent as Update #uuid# to #queued# inbox(es)", type = "information", log = "activitypub" );
+		return { action : "update", activityId : uuid, queued : queued };
+	}
+
+	/**
+	 * The ActivityPub document for a local object (kind "post"), or null. A post that was
+	 * deleted from the fediverse serves a Tombstone (the adapter answers 410 Gone).
 	 */
 	function objectDocument( required string kind, required string id ) {
 		if ( kind != "post" ) {
 			return javacast( "null", "" );
 		}
-		var post = publicPost( id );
-		if ( isNull( post ) ) {
-			return javacast( "null", "" );
-		}
-		var author = variables.actors.findActor( "Person", post.author );
+		var objectUrl = variables.actors.objectUrl( "post", id );
+		var post      = publicPost( id );
+		var author    = isNull( post ) ? javacast( "null", "" ) : variables.actors.findActor( "Person", post.author );
 		if ( isNull( author ) ) {
-			return javacast( "null", "" );
+			var deleted = variables.activities.latestFor( objectUrl, [ "Delete" ] );
+			return isNull( deleted ) ? javacast( "null", "" ) : variables.vocab.tombstone( objectUrl, "Article", deleted.createdAt );
 		}
-		return buildArticle( id, post, author );
+		var article     = buildArticle( id, post, author );
+		var lastUpdate  = variables.activities.latestFor( objectUrl, [ "Update" ] );
+		if ( !isNull( lastUpdate ) ) {
+			article[ "updated" ] = jsonDeserialize( lastUpdate.json ).object.updated;
+		}
+		return article;
 	}
 
 	/**
@@ -164,6 +231,66 @@ class {
 			"type"       : "OrderedCollection",
 			"totalItems" : variables.followers.count( type, actor.id )
 		];
+	}
+
+	/**
+	 * Delete{Tombstone} for a post that was sent before. Signed by the actor that created
+	 * it, looked up without the isPublic gate: retracting is exactly what a now-hidden
+	 * actor or post needs.
+	 */
+	private struct function deletePost( required string postId, required struct last ) {
+		var creator = jsonDeserialize( last.json ).actor;
+		var localRef = variables.actors.parseLocalUrl( creator );
+		var actor    = isNull( localRef ) ? javacast( "null", "" ) : variables.host.findActor( localRef.type, localRef.name );
+		if ( isNull( actor ) ) {
+			writeLog( text = "cannot delete post #postId#: its actor #creator# no longer exists", type = "warning", log = "activitypub" );
+			return noAction();
+		}
+		var actorUrl  = variables.actors.actorUrl( localRef.type, actor.name );
+		var objectUrl = variables.actors.objectUrl( "post", postId );
+		var uuid      = variables.activities.newId();
+		variables.activities.store( uuid, variables.vocab.delete( variables.activities.urlFor( "Delete", uuid ), actorUrl, objectUrl, actorUrl & "/followers" ) );
+		var queued = sendToFollowers( uuid, localRef.type, actor );
+		writeLog( text = "deleted #objectUrl# as Delete #uuid# to #queued# inbox(es)", type = "information", log = "activitypub" );
+		return { action : "delete", activityId : uuid, queued : queued };
+	}
+
+	/**
+	 * Queues activity uuid to every follower inbox of the actor (shared inboxes deduplicated),
+	 * signed with its key. Returns the number queued.
+	 */
+	private numeric function sendToFollowers( required string uuid, required string type, required struct actor ) {
+		var inboxes = variables.followers.deliveryInboxes( type, actor.id );
+		var keyId   = variables.actors.keyId( type, actor.name );
+		for ( var inbox in inboxes ) {
+			variables.delivery.enqueue( uuid, type, actor.id, keyId, inbox );
+		}
+		return inboxes.len();
+	}
+
+	// compare(), not ==: BoxLang's string == ignores case, and a case-only edit is still an edit.
+	private boolean function articleChanged( required struct current, required struct sent ) {
+		for ( var field in [ "name", "summary", "content", "url" ] ) {
+			if ( compare( current[ field ] ?: "", sent[ field ] ?: "" ) != 0 ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private boolean function profileChanged( required struct current, required struct sent ) {
+		for ( var field in [ "preferredUsername", "name", "summary", "url" ] ) {
+			if ( compare( current[ field ] ?: "", sent[ field ] ?: "" ) != 0 ) {
+				return true;
+			}
+		}
+		var currentIcon = isStruct( current.icon ?: "" ) ? current.icon.url : "";
+		var sentIcon    = isStruct( sent.icon ?: "" ) ? sent.icon.url : "";
+		return compare( currentIcon, sentIcon ) != 0;
+	}
+
+	private struct function noAction() {
+		return { action : "none", activityId : "", queued : 0 };
 	}
 
 	/**

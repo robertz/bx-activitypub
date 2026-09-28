@@ -64,6 +64,53 @@ class {
 	}
 
 	/**
+	 * Update wrapping the new version of an object (an Article with `updated` set, or an
+	 * actor document). Addressing is copied from the object; an actor has none of its
+	 * own, so followersUrl supplies cc.
+	 */
+	struct function update( required string id, required string actorUrl, required struct object, string followersUrl = "" ) {
+		var embedded = duplicate( object );
+		structDelete( embedded, "@context" );
+		return [
+			"@context" : variables.AS_CONTEXT,
+			"id"       : id,
+			"type"     : "Update",
+			"actor"    : actorUrl,
+			"to"       : embedded.to ?: [ variables.PUBLIC ],
+			"cc"       : embedded.cc ?: ( len( followersUrl ) ? [ followersUrl ] : [] ),
+			"object"   : embedded
+		];
+	}
+
+	/**
+	 * Delete of an object, sent as a Tombstone.
+	 */
+	struct function delete( required string id, required string actorUrl, required string objectId, required string followersUrl ) {
+		return [
+			"@context" : variables.AS_CONTEXT,
+			"id"       : id,
+			"type"     : "Delete",
+			"actor"    : actorUrl,
+			"to"       : [ variables.PUBLIC ],
+			"cc"       : [ followersUrl ],
+			"object"   : [ "id" : objectId, "type" : "Tombstone" ]
+		];
+	}
+
+	/**
+	 * What a deleted object's id serves (with 410 Gone).
+	 */
+	struct function tombstone( required string objectId, required string formerType, required date deleted ) {
+		return [
+			"@context"   : variables.AS_CONTEXT,
+			"id"         : objectId,
+			"type"       : "Tombstone",
+			"formerType" : formerType,
+			"deleted"    : isoDate( deleted )
+		];
+	}
+
+	/**
 	 * ISO 8601 in UTC, whole seconds.
 	 */
 	string function isoDate( required date value ) {

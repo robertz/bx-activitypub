@@ -1,0 +1,174 @@
+class extends="testbox.system.BaseSpec" {
+
+	variables.POST_ID   = "0192a6f0-0000-7000-8000-000000000101";
+	variables.PERSON_ID = "0192a6f0-0000-7000-8000-000000000002";
+	variables.POST_URL  = "https://site.example/post/0192a6f0-0000-7000-8000-000000000101";
+
+	function beforeAll() {
+		variables.db = new tests.helpers.TestDb();
+		db.reset();
+	}
+
+	function run() {
+		describe( "syncPost", () => {
+
+			beforeEach( () => {
+				resetRows();
+				variables.host = new tests.helpers.StubHost();
+				variables.ap   = new models.ActivityPub( host = host, settings = { datasource : db.dsn() } );
+				addFollower();
+			} );
+
+			it( "creates a public post the first time and then does nothing", () => {
+				expect( ap.syncPost( POST_ID ).action ).toBe( "create" );
+				var again = ap.syncPost( POST_ID );
+				expect( again.action ).toBe( "none" );
+				expect( activityTypes() ).toBe( [ "Create" ] );
+				expect( deliveryCount() ).toBe( 1 );
+			} );
+
+			it( "sends an Update with an updated time when the title changes", () => {
+				ap.syncPost( POST_ID );
+				editPost( "title", "Hello, again" );
+				var result = ap.syncPost( POST_ID );
+				expect( result.action ).toBe( "update" );
+				expect( result.queued ).toBe( 1 );
+
+				var update = jsonDeserialize( ap.activityJson( "update", result.activityId ) );
+				expect( update.type ).toBe( "Update" );
+				expect( update.actor ).toBe( "https://site.example/u/robert" );
+				expect( update.object.id ).toBe( POST_URL );
+				expect( update.object.name ).toBe( "Hello, again" );
+				expect( update.object.updated ).toMatch( "^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$" );
+				expect( update.object.published ).toBe( "2026-09-28T16:00:00Z" );
+				expect( ap.objectDocument( "post", POST_ID ).updated ).toBe( update.object.updated );
+
+				expect( ap.syncPost( POST_ID ).action ).toBe( "none" );
+			} );
+
+			it( "treats a case-only edit as an edit", () => {
+				ap.syncPost( POST_ID );
+				editPost( "title", "HELLO" );
+				expect( ap.syncPost( POST_ID ).action ).toBe( "update" );
+			} );
+
+			it( "does not send an Update for changes Mastodon wouldn't show", () => {
+				ap.syncPost( POST_ID );
+				editPost( "published", createDateTime( 2026, 9, 29, 12, 0, 0 ) );
+				expect( ap.syncPost( POST_ID ).action ).toBe( "none" );
+			} );
+
+			it( "deletes a sent post that is no longer public, and serves a Tombstone", () => {
+				ap.syncPost( POST_ID );
+				host.setPublic( POST_ID, false );
+				var result = ap.syncPost( POST_ID );
+				expect( result.action ).toBe( "delete" );
+				expect( result.queued ).toBe( 1 );
+
+				var del = jsonDeserialize( ap.activityJson( "delete", result.activityId ) );
+				expect( del.type ).toBe( "Delete" );
+				expect( del.actor ).toBe( "https://site.example/u/robert" );
+				expect( del.object ).toBe( { id : POST_URL, type : "Tombstone" } );
+
+				var doc = ap.objectDocument( "post", POST_ID );
+				expect( doc.type ).toBe( "Tombstone" );
+				expect( doc.formerType ).toBe( "Article" );
+				expect( ap.syncPost( POST_ID ).action ).toBe( "none" );
+			} );
+
+			it( "deletes a sent post the host no longer has at all", () => {
+				ap.syncPost( POST_ID );
+				host.removePost( POST_ID );
+				expect( ap.syncPost( POST_ID ).action ).toBe( "delete" );
+			} );
+
+			it( "does not recreate a deleted post that becomes public again", () => {
+				ap.syncPost( POST_ID );
+				host.setPublic( POST_ID, false );
+				ap.syncPost( POST_ID );
+				host.setPublic( POST_ID, true );
+				expect( ap.syncPost( POST_ID ).action ).toBe( "none" );
+				expect( ap.objectDocument( "post", POST_ID ).type ).toBe( "Article" );
+			} );
+
+			it( "never sends anything for a post that was never public", () => {
+				expect( ap.syncPost( "0192a6f0-0000-7000-8000-000000000103" ).action ).toBe( "none" );
+				expect( ap.syncPost( "0192a6f0-0000-7000-8000-000000000999" ).action ).toBe( "none" );
+				expect( activityTypes() ).toBe( [] );
+				expect( deliveryCount() ).toBe( 0 );
+			} );
+
+			it( "lists federated post ids until they are deleted", () => {
+				expect( ap.federatedPostIds() ).toBe( [] );
+				ap.syncPost( POST_ID );
+				expect( ap.federatedPostIds() ).toBe( [ POST_ID ] );
+				host.setPublic( POST_ID, false );
+				ap.syncPost( POST_ID );
+				expect( ap.federatedPostIds() ).toBe( [] );
+			} );
+
+		} );
+
+		describe( "syncActor", () => {
+
+			beforeEach( () => {
+				resetRows();
+				variables.host = new tests.helpers.StubHost();
+				variables.ap   = new models.ActivityPub( host = host, settings = { datasource : db.dsn() } );
+				addFollower();
+			} );
+
+			it( "sends Update{Person} the first time, then only on change", () => {
+				var first = ap.syncActor( "Person", "robert" );
+				expect( first.action ).toBe( "update" );
+				expect( first.queued ).toBe( 1 );
+				var update = jsonDeserialize( ap.activityJson( "update", first.activityId ) );
+				expect( update.object.type ).toBe( "Person" );
+				expect( update.object.id ).toBe( "https://site.example/u/robert" );
+				expect( update.cc ).toBe( [ "https://site.example/u/robert/followers" ] );
+				expect( update.object.keyExists( "publicKey" ) ).toBeTrue();
+
+				expect( ap.syncActor( "Person", "robert" ).action ).toBe( "none" );
+
+				host.setActorField( "Person", "robert", "summary", "<p>New bio</p>" );
+				expect( ap.syncActor( "Person", "robert" ).action ).toBe( "update" );
+
+				host.setActorField( "Person", "robert", "avatar", "https://site.example/logo.png" );
+				expect( ap.syncActor( "Person", "robert" ).action ).toBe( "update" );
+				expect( ap.syncActor( "Person", "robert" ).action ).toBe( "none" );
+			} );
+
+			it( "sends nothing for a non-public actor", () => {
+				expect( ap.syncActor( "Person", "hidden" ).action ).toBe( "none" );
+				expect( activityTypes() ).toBe( [] );
+			} );
+
+		} );
+	}
+
+	// ---- helpers -------------------------------------------------------------
+
+	private void function resetRows() {
+		db.rows( "SET FOREIGN_KEY_CHECKS = 0; DELETE FROM ApDelivery; DELETE FROM ApActivity; DELETE FROM ApFollower; DELETE FROM ApRemoteActor; SET FOREIGN_KEY_CHECKS = 1;" );
+	}
+
+	private void function addFollower() {
+		db.rows( "INSERT INTO ApRemoteActor (Id, ActorUrl, InboxUrl, SharedInboxUrl, PublicKeyId, PublicKeyPem) VALUES (UUID_TO_BIN('44444444-4444-4444-4444-444444444444'), 'https://a.example/u/1', 'https://a.example/u/1/inbox', 'https://a.example/inbox', 'k', 'p')" );
+		db.rows( "INSERT INTO ApFollower (ActorType, LocalId, RemoteActorId, InboxUrl, SharedInboxUrl, FollowActivityId) VALUES ('Person', UUID_TO_BIN(:localId), UUID_TO_BIN('44444444-4444-4444-4444-444444444444'), 'https://a.example/u/1/inbox', 'https://a.example/inbox', 'f')", { localId : PERSON_ID } );
+	}
+
+	private void function editPost( required string field, required any value ) {
+		var post       = duplicate( host.getObject( "post", POST_ID ) );
+		post[ field ]  = value;
+		host.putPost( POST_ID, post );
+	}
+
+	private array function activityTypes() {
+		return db.rows( "SELECT Type FROM ApActivity ORDER BY CreatedAt" ).map( ( row ) => row.Type );
+	}
+
+	private numeric function deliveryCount() {
+		return db.rows( "SELECT COUNT(*) AS N FROM ApDelivery" )[ 1 ].N;
+	}
+
+}
