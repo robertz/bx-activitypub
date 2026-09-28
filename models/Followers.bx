@@ -53,6 +53,19 @@ class {
 		return result.recordCount ?: 0;
 	}
 
+	/**
+	 * Removes a remote actor from every local actor's followers (their account was deleted).
+	 */
+	numeric function removeRemoteActor( required string remoteId ) {
+		var result = {};
+		queryExecute(
+			"DELETE FROM ApFollower WHERE RemoteActorId = UUID_TO_BIN(:remoteId)",
+			{ remoteId : { value : remoteId, sqltype : "varchar" } },
+			{ datasource : variables.datasource, result : "result" }
+		);
+		return result.recordCount ?: 0;
+	}
+
 	numeric function removeByFollowId( required string remoteId, required string followActivityId ) {
 		var result = {};
 		queryExecute(

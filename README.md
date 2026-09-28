@@ -4,7 +4,7 @@ Outbound [ActivityPub](https://www.w3.org/TR/activitypub/) federation for BoxLan
 
 Your app keeps its data; the module handles the protocol: WebFinger, actor documents, HTTP Signatures, the inbox, a delivery queue that survives restarts, and NodeInfo.
 
-**Status: 0.1.0.** Author mode (an account publishing `Article`s) is complete and verified against Mastodon. It's one-way: the inbox accepts `Follow` and `Undo{Follow}` and acknowledges everything else without acting on it, so replies and likes from the fediverse don't reach your app.
+**Status: 0.2.0.** Author mode (an account publishing `Article`s) is complete and verified against Mastodon. Your app can also accept **public replies** to its posts from the fediverse, and their edits and deletions, by implementing an optional second contract. Likes, boosts and everything else inbound are acknowledged and ignored.
 
 ## Requirements
 
@@ -27,7 +27,9 @@ mysql your_database < boxlang_modules/bx-activitypub/sql/schema.sql
 
 (That path is for an install into your app's own `boxlang_modules/`, i.e. with `--local`.)
 
-The module adds five `Ap*` tables and never reads or writes any of yours. Its classes are available as `bxModules.bxactivitypub.*`.
+The module adds six `Ap*` tables and never reads or writes any of yours. Its classes are available as `bxModules.bxactivitypub.*`.
+
+**Upgrading from 0.1.x:** run `sql/upgrade-0.2.0.sql` once.
 
 ## How it fits together
 
@@ -49,6 +51,24 @@ Types are `"Person"` and `"Group"` for accounts, and `"post"` for posts.
 | `findActor( type, name )` | `{ id, name, displayName, summary, avatar, url }` or `null`. `id` is your UUID for the account (keypairs and followers are keyed by it); `name` is the handle, as in `@name@host`; `summary` is HTML; `avatar` and `url` (the profile page) are optional absolute URLs. |
 | `getObject( "post", id )` | `{ author, title, summary, content, url, published }` or `null`. `author` is the Person's `name`; `content` is HTML; `url` is the post's page; `published` is a date. |
 | `isPublic( type, id )` | Whether this account or post may be federated at all. Checked before every lookup, serving and delivery; `false` means the module behaves as if it doesn't exist. Return `false` for drafts, private content and inactive accounts. |
+
+### Optional: `IRemoteReplies`
+
+Implement these too (`implements="bxModules.bxactivitypub.contracts.IHostApp,bxModules.bxactivitypub.contracts.IRemoteReplies"`) and replies from the fediverse to your public posts reach your app. Without them, the module stays one-way.
+
+| Method | |
+|---|---|
+| `acceptRemoteReply( postId, parentId, reply )` | A new reply to `postId`; `parentId` is your id of the reply it answers, or `""` for the post. Return your id for it, or `null` to refuse it. |
+| `updateRemoteReply( hostId, reply )` | Its author edited it. |
+| `deleteRemoteReply( hostId )` | Its author deleted it, or their account. |
+
+`reply` is `{ objectUrl, url, author { actorUrl, name, handle, profileUrl, avatarUrl }, contentHtml, sensitive, summary, published, attachmentCount }`.
+
+- **`contentHtml` is untrusted HTML from another server.** Sanitize it before you store or render it (for example with bx-esapi's `sanitizeHTML()` and a policy that allows only what you want to show). The module removes the leading mention of your account but does nothing else to it.
+- Only **public** replies are passed on. Followers-only replies and direct messages are dropped, and so is anything whose author isn't the account that signed it.
+- Replies to replies you accepted arrive with `parentId` set, so threads keep their shape.
+- `sensitive` and `summary` are the author's content warning; `attachmentCount` is how many images or files were attached (they aren't passed on).
+- Moderation is yours: store replies as pending, publish them straight away, or anything in between.
 
 ## Minimal example
 
@@ -188,7 +208,7 @@ The express adapter mounts these. Account and post routes answer ActivityPub req
 | GET | `/.well-known/nodeinfo`, `/nodeinfo/2.1` | NodeInfo |
 | GET | `/actor` | Instance account; signs outgoing requests |
 | GET | `/u/{name}`, `/c/{name}` | Person and Group accounts |
-| POST | `/u/{name}/inbox`, `/c/{name}/inbox`, `/inbox` | Follow and Undo{Follow} |
+| POST | `/u/{name}/inbox`, `/c/{name}/inbox`, `/inbox` | Follow and Undo{Follow}; with `IRemoteReplies`, replies (Create/Update/Delete of a Note) |
 | GET | `/u/{name}/outbox`, `/c/{name}/outbox` | Empty collection |
 | GET | `/u/{name}/followers`, `/c/{name}/followers` | Follower count only |
 | GET | `/post/{id}` | Posts |
@@ -211,7 +231,7 @@ Passed to `new ActivityPub( host, settings )`:
 
 ## Security
 
-- Every incoming `Follow` and `Undo` must carry a valid HTTP Signature from the activity's own actor, with a matching `Digest` and a recent `Date`. The `Host` is checked against your configured base URL, so a tunnel or proxy that rewrites it can't break verification.
+- Every incoming activity the module acts on must carry a valid HTTP Signature from the activity's own actor, with a matching `Digest` and a recent `Date`. Anything it doesn't act on is acknowledged without fetching anything. The `Host` is checked against your configured base URL, so a tunnel or proxy that rewrites it can't break verification.
 - Outgoing requests go only to HTTPS URLs on public addresses, and a remote account's inboxes must be on its own host, so a hostile account can't aim your server at internal or third-party URLs.
 - Private keys are stored in the `ApActorKey` table. Encrypt the database at rest if it's shared with anything else.
 

@@ -1,0 +1,37 @@
+/**
+ * Optional, alongside IHostApp: a host that implements these accepts replies from the
+ * fediverse to its public posts. A host without them stays one-way.
+ *
+ * reply: {
+ *   objectUrl,      the reply's ActivityPub id
+ *   url,            the reply's page on its own server (for "view on Mastodon")
+ *   author {        actorUrl, name, handle ("@user@host"), profileUrl, avatarUrl },
+ *   contentHtml,    the reply's HTML with the mention of the local account removed.
+ *                   UNSANITIZED: it comes from another server. Sanitize it before storing or rendering.
+ *   sensitive,      boolean; with summary, a content warning
+ *   summary,        the content warning text, or ""
+ *   published,      date
+ *   attachmentCount number of attached media (not passed on)
+ * }
+ *
+ * Only public replies are passed on, and only from the account that wrote them.
+ */
+interface {
+
+	/**
+	 * A new reply to postId (parentId is the host's id of the reply it answers, or "" for the
+	 * post itself). Returns the host's id for it, or null to refuse it.
+	 */
+	function acceptRemoteReply( required string postId, required string parentId, required struct reply );
+
+	/**
+	 * The author edited a reply the host accepted.
+	 */
+	void function updateRemoteReply( required string hostId, required struct reply );
+
+	/**
+	 * The author deleted a reply the host accepted, or deleted their account.
+	 */
+	void function deleteRemoteReply( required string hostId );
+
+}

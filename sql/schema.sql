@@ -17,6 +17,10 @@ CREATE TABLE IF NOT EXISTS `ApRemoteActor` (
 	`SharedInboxUrl` VARCHAR(512)  DEFAULT NULL,
 	`PublicKeyId`    VARCHAR(512)  NOT NULL,
 	`PublicKeyPem`   TEXT          NOT NULL,
+	`Name`           VARCHAR(255)  DEFAULT NULL,
+	`Handle`         VARCHAR(255)  DEFAULT NULL,
+	`ProfileUrl`     VARCHAR(512)  DEFAULT NULL,
+	`AvatarUrl`      VARCHAR(512)  DEFAULT NULL,
 	`FetchedAt`      DATETIME(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
 	PRIMARY KEY (`Id`),
 	UNIQUE KEY `UX_ApRemoteActor_ActorUrl` (`ActorUrl`)
@@ -67,4 +71,19 @@ CREATE TABLE IF NOT EXISTS `ApDelivery` (
 	KEY `IX_ApDelivery_Due` (`NextAttemptAt`),
 	KEY `IX_ApDelivery_Claim` (`ClaimToken`),
 	CONSTRAINT `FK_ApDelivery_ApActivity` FOREIGN KEY (`ActivityId`) REFERENCES `ApActivity` (`Id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Remote objects the host accepted (0.2.0: replies to local posts), mapped to the host's own
+-- id for them, so edits, deletes and replies-to-replies find the right record.
+CREATE TABLE IF NOT EXISTS `ApRemoteObject` (
+	`Id`            BINARY(16)    NOT NULL DEFAULT (UUID_TO_BIN(UUID())),
+	`ObjectUrl`     VARCHAR(512)  NOT NULL,
+	`ActorUrl`      VARCHAR(512)  NOT NULL,
+	`LocalPostId`   VARCHAR(64)   NOT NULL,
+	`HostId`        VARCHAR(64)   NOT NULL,
+	`CreatedAt`     DATETIME(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+	`UpdatedAt`     DATETIME(3)   DEFAULT NULL,
+	PRIMARY KEY (`Id`),
+	UNIQUE KEY `UX_ApRemoteObject_ObjectUrl` (`ObjectUrl`),
+	KEY `IX_ApRemoteObject_ActorUrl` (`ActorUrl`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

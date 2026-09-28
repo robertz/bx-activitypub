@@ -3,7 +3,8 @@
  *
  *   ap = new bxactivitypub.models.ActivityPub( host = myHost, settings = { datasource : "mydsn" } );
  *
- * host implements contracts/IHostApp.bx. isPublic() gates every actor and object lookup,
+ * host implements contracts/IHostApp.bx, and optionally contracts/IRemoteReplies.bx to accept
+ * replies from the fediverse. isPublic() gates every actor and object lookup,
  * so a non-public actor or post is never served, followed or delivered.
  *
  * settings:
@@ -17,7 +18,7 @@
  */
 class {
 
-	variables.VERSION = "0.1.0";
+	variables.VERSION = "0.2.0";
 
 	function init( required host, required struct settings ) {
 		if ( !len( settings.datasource ?: "" ) ) {
@@ -46,6 +47,15 @@ class {
 			softwareName    = settings.softwareName ?: "bx-activitypub",
 			softwareVersion = settings.softwareVersion ?: variables.VERSION
 		);
+		variables.remoteObjects = new RemoteObjects( dsn );
+		variables.replies       = new Replies(
+			host          = host,
+			actors        = variables.actors,
+			remoteObjects = variables.remoteObjects,
+			remoteActors  = variables.remoteActors,
+			followers     = variables.followers,
+			vocab         = variables.vocab
+		);
 		variables.inbox        = new Inbox(
 			signatures   = variables.signatures,
 			remoteActors = variables.remoteActors,
@@ -53,7 +63,8 @@ class {
 			followers    = variables.followers,
 			activities   = variables.activities,
 			delivery     = variables.delivery,
-			vocab        = variables.vocab
+			vocab        = variables.vocab,
+			replies      = variables.replies
 		);
 		return this;
 	}

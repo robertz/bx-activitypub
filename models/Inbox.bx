@@ -1,7 +1,8 @@
 /**
- * Inbox: handles Follow and Undo{Follow}; everything else is acknowledged with 202 and
- * dropped without fetching anything. Every handled activity must carry a valid HTTP
- * signature from the activity's own actor.
+ * Inbox: handles Follow and Undo{Follow}, and (when the host accepts them) replies to local
+ * posts via Replies.bx. Everything else is acknowledged with 202 and dropped without fetching
+ * anything. Every handled activity must carry a valid HTTP signature from the activity's own
+ * actor.
  *
  * handle() returns { status, reason } for the adapter to send and log.
  */
@@ -16,7 +17,8 @@ class {
 		required followers,
 		required activities,
 		required delivery,
-		required vocab
+		required vocab,
+		required replies
 	) {
 		variables.signatures   = arguments.signatures;
 		variables.remoteActors = arguments.remoteActors;
@@ -25,6 +27,7 @@ class {
 		variables.activities   = arguments.activities;
 		variables.delivery     = arguments.delivery;
 		variables.vocab        = arguments.vocab;
+		variables.replies      = arguments.replies;
 		return this;
 	}
 
@@ -43,16 +46,20 @@ class {
 		if ( !isStruct( activity ) || !isSimpleValue( activity.type ?: "" ) ) {
 			return result( 400, "body is not an activity" );
 		}
-		if ( !variables.HANDLED_TYPES.findNoCase( activity.type ?: "" ) ) {
+		var isFollowing = variables.HANDLED_TYPES.find( activity.type ?: "" ) > 0;
+		if ( !isFollowing && !variables.replies.concerns( activity ) ) {
 			return result( 202, "ignored #activity.type ?: 'untyped'#" );
 		}
 
-		var verified = verify( method, path, headers, body, activity );
+		var verified = verify( method, path, headers, body, activity, activity.type == "Delete" );
 		if ( !verified.valid ) {
 			writeLog( text = "inbox rejected #activity.type# from #variables.vocab.idOf( activity.actor ?: '' )#: #verified.reason#", type = "warning", log = "activitypub" );
 			return result( 401, verified.reason );
 		}
 
+		if ( !isFollowing ) {
+			return variables.replies.handle( activity, verified.remote );
+		}
 		return activity.type == "Follow"
 			? handleFollow( activity, verified.remote )
 			: handleUndo( activity, verified.remote );
@@ -110,7 +117,7 @@ class {
 	 * rather than the request, so a tunnel or proxy that rewrites Host can't break
 	 * verification; a request signed for any other host still fails.
 	 */
-	private struct function verify( required string method, required string path, required struct headers, required any body, required struct activity ) {
+	private struct function verify( required string method, required string path, required struct headers, required any body, required struct activity, boolean allowStaleKey = false ) {
 		if ( !len( headers.signature ?: "" ) ) {
 			return { valid : false, reason : "no Signature header" };
 		}
@@ -124,7 +131,7 @@ class {
 		signed.host = variables.actors.authority();
 
 		try {
-			var remote = variables.remoteActors.forKeyId( parsed.keyId );
+			var remote = variables.remoteActors.forKeyId( parsed.keyId, false, allowStaleKey );
 		} catch ( BxActivityPub.KeyMismatch e ) {
 			try {
 				remote = variables.remoteActors.forKeyId( parsed.keyId, true );
@@ -150,7 +157,7 @@ class {
 		}
 
 		var claimedActor = variables.vocab.idOf( activity.actor ?: "" );
-		if ( claimedActor != remote.actorUrl ) {
+		if ( compare( claimedActor, remote.actorUrl ) != 0 ) {
 			return { valid : false, reason : "activity actor #claimedActor# is not the key owner #remote.actorUrl#" };
 		}
 		return { valid : true, reason : "", remote : remote };

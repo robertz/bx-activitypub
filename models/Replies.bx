@@ -1,0 +1,260 @@
+/**
+ * Replies from the fediverse to local posts, passed to a host that implements
+ * contracts/IRemoteReplies.bx. The rules:
+ *
+ *   - only public replies (Public in to/cc); a followers-only reply or a direct message is
+ *     dropped, never passed on
+ *   - the Note's attributedTo must be the (signature-verified) actor
+ *   - inReplyTo must be a public local post, or a reply the host already accepted
+ *   - edits and deletions apply only to a reply the same actor sent; Delete{Person}
+ *     removes all of that actor's replies and follows
+ *
+ * concerns() decides, without any network access, whether an activity is worth verifying.
+ */
+class {
+
+	variables.PUBLIC_IDS = [ "https://www.w3.org/ns/activitystreams##Public", "as:Public", "Public" ];
+
+	function init( required host, required actors, required remoteObjects, required remoteActors, required followers, required vocab ) {
+		variables.host          = arguments.host;
+		variables.actors        = arguments.actors;
+		variables.remoteObjects = arguments.remoteObjects;
+		variables.remoteActors  = arguments.remoteActors;
+		variables.followers     = arguments.followers;
+		variables.vocab         = arguments.vocab;
+		return this;
+	}
+
+	boolean function enabled() {
+		return structKeyExists( variables.host, "acceptRemoteReply" );
+	}
+
+	/**
+	 * Whether this activity could be a reply-related one for us. Cheap: no network.
+	 */
+	boolean function concerns( required struct activity ) {
+		if ( !enabled() ) {
+			return false;
+		}
+		var type = activity.type ?: "";
+		if ( type == "Delete" ) {
+			var objectId = variables.vocab.idOf( activity.object ?: "" );
+			if ( len( objectId ) && compare( objectId, variables.vocab.idOf( activity.actor ?: "" ) ) == 0 ) {
+				return variables.remoteObjects.hasActor( objectId );
+			}
+			return !isNull( variables.remoteObjects.find( objectId ) );
+		}
+		var obj = activity.object ?: "";
+		if ( !isStruct( obj ) || ( obj.type ?: "" ) != "Note" ) {
+			return false;
+		}
+		if ( type == "Update" ) {
+			return !isNull( variables.remoteObjects.find( variables.vocab.idOf( obj.id ?: "" ) ) );
+		}
+		if ( type == "Create" ) {
+			var target = variables.vocab.idOf( obj.inReplyTo ?: "" );
+			return len( localPostId( target ) ) || !isNull( variables.remoteObjects.find( target ) );
+		}
+		return false;
+	}
+
+	/**
+	 * activity has passed signature verification as coming from remote. Returns { status, reason }.
+	 */
+	struct function handle( required struct activity, required struct remote ) {
+		switch ( activity.type ) {
+			case "Create":
+				return handleCreate( activity, remote );
+			case "Update":
+				return handleUpdate( activity, remote );
+			case "Delete":
+				return handleDelete( activity, remote );
+		}
+		return result( 202, "ignored #activity.type#" );
+	}
+
+	/**
+	 * The reply's HTML with mentions of local accounts removed (Mastodon starts every reply
+	 * with one). Mentions are matched by the local accounts named in the Note's Mention tags.
+	 */
+	string function stripLocalMentions( required string html, any tags ) {
+		var names = [];
+		for ( var tag in isArray( tags ?: "" ) ? tags : [] ) {
+			if ( isStruct( tag ) && ( tag.type ?: "" ) == "Mention" ) {
+				var localRef = variables.actors.parseLocalUrl( tag.href ?: "" );
+				if ( !isNull( localRef ) ) {
+					names.append( localRef.name );
+				}
+			}
+		}
+		var out = html;
+		for ( var name in names ) {
+			var quoted = reReplace( name, "([.\\+*?\[^\]$(){}=!<>|:-])", "\\\1", "all" );
+			// <span class="h-card" ...><a ... class="u-url mention">@<span>name</span></a></span>, with or without the span wrappers
+			out = reReplaceNoCase( out, "(<span[^>]*h-card[^>]*>\s*)?<a [^>]*>\s*@(<span>)?#quoted#(</span>)?\s*</a>(\s*</span>)?\s*", "", "all" );
+		}
+		return out;
+	}
+
+	// ---- handlers ------------------------------------------------------------
+
+	private struct function handleCreate( required struct activity, required struct remote ) {
+		var obj = activity.object;
+		if ( !sameUrl( variables.vocab.idOf( obj.attributedTo ?: "" ), remote.actorUrl ) ) {
+			return result( 401, "reply attributed to someone other than the signer" );
+		}
+		if ( !isPubliclyAddressed( activity, obj ) ) {
+			return result( 202, "ignored non-public reply" );
+		}
+		var objectUrl = variables.vocab.idOf( obj.id ?: "" );
+		if ( !len( objectUrl ) ) {
+			return result( 400, "reply has no id" );
+		}
+		if ( !isNull( variables.remoteObjects.find( objectUrl ) ) ) {
+			return result( 202, "reply already accepted" );
+		}
+
+		var target   = variables.vocab.idOf( obj.inReplyTo ?: "" );
+		var postId   = localPostId( target );
+		var parentId = "";
+		if ( !len( postId ) ) {
+			var parent = variables.remoteObjects.find( target );
+			if ( isNull( parent ) ) {
+				return result( 202, "ignored reply to unknown object" );
+			}
+			postId   = parent.postId;
+			parentId = parent.hostId;
+		}
+		if ( isNull( variables.host.getObject( "post", postId ) ) || !variables.host.isPublic( "post", postId ) ) {
+			return result( 202, "ignored reply to a non-public post" );
+		}
+
+		var hostId = variables.host.acceptRemoteReply( postId, parentId, buildReply( obj, remote ) );
+		if ( isNull( hostId ) || !len( hostId ) ) {
+			return result( 202, "host refused reply" );
+		}
+		variables.remoteObjects.add( objectUrl, remote.actorUrl, postId, hostId );
+		writeLog( text = "accepted reply #objectUrl# from #remote.actorUrl# on post #postId# as #hostId#", type = "information", log = "activitypub" );
+		return result( 202, "accepted reply" );
+	}
+
+	private struct function handleUpdate( required struct activity, required struct remote ) {
+		var obj   = activity.object;
+		var known = variables.remoteObjects.find( variables.vocab.idOf( obj.id ?: "" ) );
+		if ( isNull( known ) ) {
+			return result( 202, "ignored update of unknown object" );
+		}
+		if ( !sameUrl( known.actorUrl, remote.actorUrl ) || !sameUrl( variables.vocab.idOf( obj.attributedTo ?: "" ), remote.actorUrl ) ) {
+			return result( 401, "update of someone else's reply" );
+		}
+		if ( !isPubliclyAddressed( activity, obj ) ) {
+			return result( 202, "ignored non-public update" );
+		}
+		variables.host.updateRemoteReply( known.hostId, buildReply( obj, remote ) );
+		variables.remoteObjects.touch( known.objectUrl );
+		writeLog( text = "updated reply #known.objectUrl# (#known.hostId#)", type = "information", log = "activitypub" );
+		return result( 202, "updated reply" );
+	}
+
+	private struct function handleDelete( required struct activity, required struct remote ) {
+		var objectId = variables.vocab.idOf( activity.object ?: "" );
+
+		if ( sameUrl( objectId, remote.actorUrl ) ) {
+			var gone = variables.remoteObjects.findByActor( remote.actorUrl );
+			for ( var known in gone ) {
+				variables.host.deleteRemoteReply( known.hostId );
+				variables.remoteObjects.remove( known.objectUrl );
+			}
+			var unfollowed = variables.followers.removeRemoteActor( remote.id );
+			writeLog( text = "#remote.actorUrl# deleted their account: removed #gone.len()# reply(ies), #unfollowed# follow(s)", type = "information", log = "activitypub" );
+			return result( 202, "account deleted" );
+		}
+
+		var known = variables.remoteObjects.find( objectId );
+		if ( isNull( known ) ) {
+			return result( 202, "ignored delete of unknown object" );
+		}
+		if ( !sameUrl( known.actorUrl, remote.actorUrl ) ) {
+			return result( 401, "delete of someone else's reply" );
+		}
+		variables.host.deleteRemoteReply( known.hostId );
+		variables.remoteObjects.remove( known.objectUrl );
+		writeLog( text = "deleted reply #known.objectUrl# (#known.hostId#)", type = "information", log = "activitypub" );
+		return result( 202, "deleted reply" );
+	}
+
+	// ---- helpers -------------------------------------------------------------
+
+	private struct function buildReply( required struct obj, required struct remote ) {
+		var author = remote;
+		if ( !len( author.handle ?: "" ) ) {
+			// Cached before 0.2.0 stored display fields; refetch once.
+			try {
+				author = variables.remoteActors.fetchAndStore( remote.actorUrl );
+			} catch ( any e ) {
+				writeLog( text = "could not refresh #remote.actorUrl#: #e.message#", type = "warning", log = "activitypub" );
+			}
+		}
+		var content = isSimpleValue( obj.content ?: "" ) ? ( obj.content ?: "" ) : "";
+		if ( !len( content ) && isStruct( obj.contentMap ?: "" ) && !obj.contentMap.isEmpty() ) {
+			content = obj.contentMap[ obj.contentMap.keyArray()[ 1 ] ];
+		}
+		var attachments = obj.attachment ?: [];
+		return {
+			objectUrl       : obj.id,
+			url             : len( variables.remoteActors.firstLink( obj.url ?: "" ) ) ? variables.remoteActors.firstLink( obj.url ) : obj.id,
+			author          : {
+				actorUrl   : remote.actorUrl,
+				name       : author.name ?: "",
+				handle     : author.handle ?: "",
+				profileUrl : author.profileUrl ?: "",
+				avatarUrl  : author.avatarUrl ?: ""
+			},
+			contentHtml     : stripLocalMentions( content, obj.tag ?: [] ),
+			sensitive       : isBoolean( obj.sensitive ?: false ) && ( obj.sensitive ?: false ),
+			summary         : isSimpleValue( obj.summary ?: "" ) ? ( obj.summary ?: "" ) : "",
+			published       : isDate( obj.published ?: "" ) ? parseDateTime( obj.published ) : now(),
+			attachmentCount : isArray( attachments ) ? attachments.len() : ( isStruct( attachments ) ? 1 : 0 )
+		};
+	}
+
+	/**
+	 * Public in the Note's own to/cc, or the activity's when the Note carries none.
+	 */
+	private boolean function isPubliclyAddressed( required struct activity, required struct obj ) {
+		var source   = ( obj.keyExists( "to" ) || obj.keyExists( "cc" ) ) ? obj : activity;
+		var audience = [];
+		for ( var field in [ "to", "cc" ] ) {
+			var value = source[ field ] ?: [];
+			audience.append( isArray( value ) ? value : [ value ], true );
+		}
+		for ( var addressee in audience ) {
+			if ( isSimpleValue( addressee ) && variables.PUBLIC_IDS.find( addressee ) ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * The local post id for one of our post URLs, or "".
+	 */
+	private string function localPostId( required string candidate ) {
+		var prefix = variables.actors.objectUrl( "post", "" );
+		if ( candidate.len() <= prefix.len() || compare( left( candidate, prefix.len() ), prefix ) != 0 ) {
+			return "";
+		}
+		var id = mid( candidate, prefix.len() + 1, candidate.len() );
+		return id.find( "/" ) ? "" : id;
+	}
+
+	// compare(), not ==: BoxLang's string == ignores case, and URL paths are case-sensitive.
+	private boolean function sameUrl( required string a, required string b ) {
+		return len( a ) && compare( a, b ) == 0;
+	}
+
+	private struct function result( required numeric status, required string reason ) {
+		return { status : status, reason : reason };
+	}
+
+}

@@ -2,7 +2,8 @@
  * Fetches remote actors (signed GET as the instance actor) and caches their inbox
  * and public key in ApRemoteActor.
  *
- * Returned shape: { id, actorUrl, inboxUrl, sharedInboxUrl, publicKeyId, publicKeyPem, fromCache }.
+ * Returned shape: { id, actorUrl, inboxUrl, sharedInboxUrl, publicKeyId, publicKeyPem,
+ * name, handle, profileUrl, avatarUrl, fromCache }. handle is "@user@host".
  */
 class {
 
@@ -18,9 +19,11 @@ class {
 	 * Resolves the actor that owns keyId. Only the Mastodon/Lemmy shape is supported:
 	 * keyId = "{actorUrl}#main-key", with publicKey.id equal to keyId.
 	 */
-	struct function forKeyId( required string keyId, boolean refresh = false ) {
+	struct function forKeyId( required string keyId, boolean refresh = false, boolean allowStale = false ) {
 		var actorUrl = listFirst( keyId, "##" );
-		var remote   = refresh ? javacast( "null", "" ) : readFresh( actorUrl );
+		// allowStale: a deleted account's Delete{Person} is signed with a key we can no longer
+		// fetch (the actor answers 410), so the cached one, however old, is the only way to verify it.
+		var remote   = refresh ? javacast( "null", "" ) : read( actorUrl, !allowStale );
 		if ( isNull( remote ) ) {
 			remote = fetchAndStore( actorUrl );
 		}
@@ -44,16 +47,21 @@ class {
 		var parsed = parseActor( actorUrl, doc );
 
 		queryExecute(
-			"INSERT INTO ApRemoteActor (ActorUrl, InboxUrl, SharedInboxUrl, PublicKeyId, PublicKeyPem, FetchedAt)
-			 VALUES (:actorUrl, :inboxUrl, :sharedInboxUrl, :publicKeyId, :publicKeyPem, NOW(3))
+			"INSERT INTO ApRemoteActor (ActorUrl, InboxUrl, SharedInboxUrl, PublicKeyId, PublicKeyPem, Name, Handle, ProfileUrl, AvatarUrl, FetchedAt)
+			 VALUES (:actorUrl, :inboxUrl, :sharedInboxUrl, :publicKeyId, :publicKeyPem, :name, :handle, :profileUrl, :avatarUrl, NOW(3))
 			 ON DUPLICATE KEY UPDATE InboxUrl = VALUES(InboxUrl), SharedInboxUrl = VALUES(SharedInboxUrl),
-				PublicKeyId = VALUES(PublicKeyId), PublicKeyPem = VALUES(PublicKeyPem), FetchedAt = NOW(3)",
+				PublicKeyId = VALUES(PublicKeyId), PublicKeyPem = VALUES(PublicKeyPem), Name = VALUES(Name),
+				Handle = VALUES(Handle), ProfileUrl = VALUES(ProfileUrl), AvatarUrl = VALUES(AvatarUrl), FetchedAt = NOW(3)",
 			{
 				actorUrl       : { value : parsed.actorUrl, sqltype : "varchar" },
 				inboxUrl       : { value : parsed.inboxUrl, sqltype : "varchar" },
 				sharedInboxUrl : { value : parsed.sharedInboxUrl, sqltype : "varchar", null : !len( parsed.sharedInboxUrl ) },
 				publicKeyId    : { value : parsed.publicKeyId, sqltype : "varchar" },
-				publicKeyPem   : { value : parsed.publicKeyPem, sqltype : "longvarchar" }
+				publicKeyPem   : { value : parsed.publicKeyPem, sqltype : "longvarchar" },
+				name           : { value : left( parsed.name, 255 ), sqltype : "varchar" },
+				handle         : { value : left( parsed.handle, 255 ), sqltype : "varchar" },
+				profileUrl     : { value : left( parsed.profileUrl, 512 ), sqltype : "varchar" },
+				avatarUrl      : { value : left( parsed.avatarUrl, 512 ), sqltype : "varchar" }
 			},
 			{ datasource : variables.datasource }
 		);
@@ -96,20 +104,41 @@ class {
 		if ( len( sharedInboxUrl ) && hostOf( sharedInboxUrl ) != host ) {
 			throw( type = "BxActivityPub.InvalidActor", message = "Actor #doc.id# sharedInbox [#sharedInboxUrl#] is not on #host#" );
 		}
+		var username = isSimpleValue( doc.preferredUsername ?: "" ) ? ( doc.preferredUsername ?: "" ) : "";
+		var icon     = doc.icon ?: "";
+		if ( isArray( icon ) ) {
+			icon = icon.len() ? icon[ 1 ] : "";
+		}
 		return {
 			actorUrl       : doc.id,
 			inboxUrl       : inboxUrl,
 			sharedInboxUrl : sharedInboxUrl,
 			publicKeyId    : key.id,
-			publicKeyPem   : key.publicKeyPem
+			publicKeyPem   : key.publicKeyPem,
+			name           : isSimpleValue( doc.name ?: "" ) && len( doc.name ?: "" ) ? doc.name : username,
+			handle         : len( username ) ? "@#username#@#host#" : "",
+			profileUrl     : firstLink( doc.url ?: "" ),
+			avatarUrl      : isStruct( icon ) ? firstLink( icon.url ?: "" ) : firstLink( icon )
 		};
 	}
 
-	// ---- private -------------------------------------------------------------
-
-	private function readFresh( required string actorUrl ) {
-		return read( actorUrl, true );
+	/**
+	 * An https URL from a property that may be a string, a Link object or an array of either.
+	 */
+	string function firstLink( any value ) {
+		if ( isNull( value ) ) {
+			return "";
+		}
+		if ( isArray( value ) ) {
+			return value.len() ? firstLink( value[ 1 ] ) : "";
+		}
+		if ( isStruct( value ) ) {
+			return firstLink( value.href ?: ( value.url ?: "" ) );
+		}
+		return isSimpleValue( value ) && lCase( left( value, 8 ) ) == "https://" ? value : "";
 	}
+
+	// ---- private -------------------------------------------------------------
 
 	private function read( required string actorUrl, required boolean freshOnly ) {
 		var params = { actorUrl : { value : actorUrl, sqltype : "varchar" } };
@@ -117,7 +146,7 @@ class {
 			params.ttl = { value : variables.ttlSeconds, sqltype : "integer" };
 		}
 		var rows = queryExecute(
-			"SELECT BIN_TO_UUID(Id) AS Id, ActorUrl, InboxUrl, SharedInboxUrl, PublicKeyId, PublicKeyPem
+			"SELECT BIN_TO_UUID(Id) AS Id, ActorUrl, InboxUrl, SharedInboxUrl, PublicKeyId, PublicKeyPem, Name, Handle, ProfileUrl, AvatarUrl
 			 FROM ApRemoteActor
 			 WHERE ActorUrl = :actorUrl" & ( freshOnly ? " AND FetchedAt > NOW(3) - INTERVAL :ttl SECOND" : "" ),
 			params,
@@ -134,6 +163,10 @@ class {
 			sharedInboxUrl : row.SharedInboxUrl ?: "",
 			publicKeyId    : row.PublicKeyId,
 			publicKeyPem   : row.PublicKeyPem,
+			name           : row.Name ?: "",
+			handle         : row.Handle ?: "",
+			profileUrl     : row.ProfileUrl ?: "",
+			avatarUrl      : row.AvatarUrl ?: "",
 			fromCache      : true
 		};
 	}

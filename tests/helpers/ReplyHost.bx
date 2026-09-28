@@ -1,0 +1,30 @@
+/**
+ * StubHost that also accepts replies (IRemoteReplies), recording every call.
+ */
+class extends="tests.helpers.StubHost" implements="contracts.IRemoteReplies" {
+
+	variables.calls     = { accept : [], update : [], delete : [] };
+	variables.refuseAll = false;
+
+	function acceptRemoteReply( required string postId, required string parentId, required struct reply ) {
+		variables.calls.accept.append( { postId : postId, parentId : parentId, reply : reply } );
+		return variables.refuseAll ? javacast( "null", "" ) : "comment-#variables.calls.accept.len()#";
+	}
+
+	void function updateRemoteReply( required string hostId, required struct reply ) {
+		variables.calls.update.append( { hostId : hostId, reply : reply } );
+	}
+
+	void function deleteRemoteReply( required string hostId ) {
+		variables.calls.delete.append( hostId );
+	}
+
+	struct function calls() {
+		return variables.calls;
+	}
+
+	void function refuseReplies() {
+		variables.refuseAll = true;
+	}
+
+}

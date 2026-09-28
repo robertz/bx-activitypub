@@ -10,7 +10,11 @@ class extends="testbox.system.BaseSpec" {
 					type      : "Person",
 					inbox     : "https://mastodon.social/ap/users/1/inbox",
 					endpoints : { sharedInbox : "https://mastodon.social/inbox" },
-					publicKey : { id : "https://mastodon.social/ap/users/1##main-key", owner : "https://mastodon.social/ap/users/1", publicKeyPem : "PEM" }
+					publicKey : { id : "https://mastodon.social/ap/users/1##main-key", owner : "https://mastodon.social/ap/users/1", publicKeyPem : "PEM" },
+					preferredUsername : "zendarr",
+					name      : "Robert Zehnder",
+					url       : "https://mastodon.social/@zendarr",
+					icon      : { type : "Image", mediaType : "image/png", url : "https://files.mastodon.social/a.png" }
 				};
 			} );
 
@@ -21,8 +25,25 @@ class extends="testbox.system.BaseSpec" {
 					inboxUrl       : doc.inbox,
 					sharedInboxUrl : "https://mastodon.social/inbox",
 					publicKeyId    : doc.publicKey.id,
-					publicKeyPem   : "PEM"
+					publicKeyPem   : "PEM",
+					name           : "Robert Zehnder",
+					handle         : "@zendarr@mastodon.social",
+					profileUrl     : "https://mastodon.social/@zendarr",
+					avatarUrl      : "https://files.mastodon.social/a.png"
 				} );
+			} );
+
+			it( "falls back to the username for a missing display name", () => {
+				doc.name = "";
+				expect( remoteActors.parseActor( doc.id, doc ).name ).toBe( "zendarr" );
+			} );
+
+			it( "reads url and icon given as arrays or Link objects, and only keeps https", () => {
+				doc.url  = [ { type : "Link", href : "https://mastodon.social/@zendarr" } ];
+				doc.icon = [ { type : "Image", url : "http://insecure.example/a.png" } ];
+				var parsed = remoteActors.parseActor( doc.id, doc );
+				expect( parsed.profileUrl ).toBe( "https://mastodon.social/@zendarr" );
+				expect( parsed.avatarUrl ).toBe( "" );
 			} );
 
 			it( "tolerates a missing sharedInbox", () => {

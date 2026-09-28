@@ -1,0 +1,305 @@
+/**
+ * Replies from the fediverse, end to end through Inbox with real signatures. Fixtures are
+ * the Create{Note} activities Mastodon 4.8.0-alpha actually sent (hosts replaced).
+ */
+class extends="testbox.system.BaseSpec" {
+
+	variables.ALICE     = "https://remote.example/users/alice";
+	variables.MALLORY   = "https://remote.example/users/mallory";
+	variables.POST_ID   = "0192a6f0-0000-7000-8000-000000000101";
+	variables.DRAFT_ID  = "0192a6f0-0000-7000-8000-000000000103";
+	variables.POST_URL  = "https://site.example/post/0192a6f0-0000-7000-8000-000000000101";
+	variables.PUBLIC    = "https://www.w3.org/ns/activitystreams##Public";
+
+	function beforeAll() {
+		variables.db   = new tests.helpers.TestDb();
+		db.reset();
+		variables.sigs = new models.Signatures();
+		variables.keys = { "#ALICE#" : sigs.generateKeyPair(), "#MALLORY#" : sigs.generateKeyPair() };
+	}
+
+	function run() {
+		describe( "Replies", () => {
+
+			beforeEach( () => {
+				db.rows( "SET FOREIGN_KEY_CHECKS = 0; DELETE FROM ApRemoteObject; DELETE FROM ApFollower; DELETE FROM ApRemoteActor; SET FOREIGN_KEY_CHECKS = 1;" );
+				variables.host  = new tests.helpers.ReplyHost();
+				variables.inbox = buildInbox( host );
+			} );
+
+			it( "passes a public reply to the host with the mention stripped", () => {
+				var outcome = post( createNote( "n1" ) );
+				expect( outcome.reason ).toBe( "accepted reply" );
+				var call = host.calls().accept[ 1 ];
+				expect( call.postId ).toBe( POST_ID );
+				expect( call.parentId ).toBe( "" );
+				expect( call.reply.objectUrl ).toBe( "https://remote.example/users/alice/statuses/n1" );
+				expect( call.reply.url ).toBe( "https://remote.example/@alice/n1" );
+				expect( call.reply.contentHtml ).toBe( "<p>neat</p>" );
+				expect( call.reply.author ).toBe( { actorUrl : ALICE, name : "Alice", handle : "@alice@remote.example", profileUrl : "https://remote.example/@alice", avatarUrl : "" } );
+				expect( call.reply.sensitive ).toBeFalse();
+				expect( call.reply.attachmentCount ).toBe( 0 );
+				expect( call.reply.published.toInstant().toString() ).toBe( "2026-09-28T17:17:29Z" );
+				expect( remoteObjectUrls() ).toBe( [ "https://remote.example/users/alice/statuses/n1" ] );
+			} );
+
+			it( "never passes on a followers-only reply", () => {
+				var note = createNote( "n2" );
+				note.to  = [ "#ALICE#/followers" ];
+				note.cc  = [ "https://site.example/u/robert" ];
+				note.object.to = note.to;
+				note.object.cc = note.cc;
+				expect( post( note ).reason ).toBe( "ignored non-public reply" );
+				expect( host.calls().accept ).toBeEmpty();
+				expect( remoteObjectUrls() ).toBeEmpty();
+			} );
+
+			it( "never passes on a direct message", () => {
+				var note = createNote( "n3" );
+				note.to  = [ "https://site.example/u/robert" ];
+				note.cc  = [];
+				note.object.to = note.to;
+				note.object.cc = note.cc;
+				expect( post( note ).reason ).toBe( "ignored non-public reply" );
+				expect( host.calls().accept ).toBeEmpty();
+			} );
+
+			it( "refuses a reply attributed to someone other than the signer", () => {
+				var note = createNote( "n4" );
+				note.object.attributedTo = MALLORY;
+				expect( post( note ).status ).toBe( 401 );
+				expect( host.calls().accept ).toBeEmpty();
+			} );
+
+			it( "ignores a reply to a non-public post", () => {
+				var note = createNote( "n5" );
+				note.object.inReplyTo = "https://site.example/post/#DRAFT_ID#";
+				expect( post( note ).reason ).toBe( "ignored reply to a non-public post" );
+				expect( host.calls().accept ).toBeEmpty();
+			} );
+
+			it( "ignores replies to anything else without fetching a key", () => {
+				var note = createNote( "n6" );
+				note.object.inReplyTo = "https://elsewhere.example/notes/1";
+				expect( post( note ).reason ).toInclude( "ignored" );
+				expect( remoteActors.$count( "forKeyId" ) ).toBe( 0 );
+			} );
+
+			it( "threads a reply to an accepted reply under it", () => {
+				post( createNote( "n7" ) );
+				var child = createNote( "n8" );
+				child.object.inReplyTo = "https://remote.example/users/alice/statuses/n7";
+				post( child );
+				var call = host.calls().accept[ 2 ];
+				expect( call.postId ).toBe( POST_ID );
+				expect( call.parentId ).toBe( "comment-1" );
+			} );
+
+			it( "accepts the same reply only once", () => {
+				post( createNote( "n9" ) );
+				expect( post( createNote( "n9" ) ).reason ).toBe( "reply already accepted" );
+				expect( host.calls().accept.len() ).toBe( 1 );
+			} );
+
+			it( "passes content warnings and attachment counts through", () => {
+				var note = createNote( "n10" );
+				note.object.sensitive  = true;
+				note.object.summary    = "spoilers";
+				note.object.attachment = [ { type : "Document", url : "https://remote.example/a.png" }, { type : "Document", url : "https://remote.example/b.png" } ];
+				post( note );
+				var reply = host.calls().accept[ 1 ].reply;
+				expect( reply.sensitive ).toBeTrue();
+				expect( reply.summary ).toBe( "spoilers" );
+				expect( reply.attachmentCount ).toBe( 2 );
+			} );
+
+			it( "records nothing when the host refuses", () => {
+				host.refuseReplies();
+				expect( post( createNote( "n11" ) ).reason ).toBe( "host refused reply" );
+				expect( remoteObjectUrls() ).toBeEmpty();
+			} );
+
+			it( "applies an edit from the author, and refuses one from anyone else", () => {
+				post( createNote( "n12" ) );
+				var update = createNote( "n12" );
+				update.type = "Update";
+				update.id   = "https://remote.example/users/alice/statuses/n12##updates/1";
+				update.object.content = "<p>edited</p>";
+				expect( post( update ).reason ).toBe( "updated reply" );
+				expect( host.calls().update[ 1 ].hostId ).toBe( "comment-1" );
+				expect( host.calls().update[ 1 ].reply.contentHtml ).toBe( "<p>edited</p>" );
+
+				var forged = duplicate( update );
+				forged.actor = MALLORY;
+				forged.object.attributedTo = MALLORY;
+				expect( post( forged, MALLORY ).status ).toBe( 401 );
+				expect( host.calls().update.len() ).toBe( 1 );
+			} );
+
+			it( "applies a delete from the author, and refuses one from anyone else", () => {
+				post( createNote( "n13" ) );
+				var forged = deleteOf( "https://remote.example/users/alice/statuses/n13", MALLORY );
+				expect( post( forged, MALLORY ).status ).toBe( 401 );
+				expect( host.calls().delete ).toBeEmpty();
+
+				expect( post( deleteOf( "https://remote.example/users/alice/statuses/n13", ALICE ) ).reason ).toBe( "deleted reply" );
+				expect( host.calls().delete ).toBe( [ "comment-1" ] );
+				expect( remoteObjectUrls() ).toBeEmpty();
+			} );
+
+			it( "removes all replies and follows of a deleted account, using the cached key", () => {
+				post( createNote( "n14" ) );
+				post( createNote( "n15" ) );
+				db.rows( "INSERT INTO ApRemoteActor (Id, ActorUrl, InboxUrl, PublicKeyId, PublicKeyPem) VALUES (UUID_TO_BIN('55555555-5555-5555-5555-555555555555'), :a, 'https://remote.example/inbox', 'k', 'p')", { a : ALICE } );
+				db.rows( "INSERT INTO ApFollower (ActorType, LocalId, RemoteActorId, InboxUrl, FollowActivityId) VALUES ('Person', UUID_TO_BIN('0192a6f0-0000-7000-8000-000000000002'), UUID_TO_BIN('55555555-5555-5555-5555-555555555555'), 'https://remote.example/inbox', 'f')" );
+
+				var outcome = post( deleteOf( ALICE, ALICE ) );
+				expect( outcome.reason ).toBe( "account deleted" );
+				expect( host.calls().delete ).toBe( [ "comment-1", "comment-2" ] );
+				expect( remoteObjectUrls() ).toBeEmpty();
+				expect( db.rows( "SELECT COUNT(*) AS N FROM ApFollower" )[ 1 ].N ).toBe( 0 );
+				var keyLookup = remoteActors.$callLog().forKeyId;
+				expect( keyLookup[ keyLookup.len() ][ 3 ] ).toBeTrue();
+			} );
+
+			it( "ignores account deletions from strangers without fetching a key", () => {
+				expect( post( deleteOf( MALLORY, MALLORY ), MALLORY ).reason ).toInclude( "ignored" );
+				expect( remoteActors.$count( "forKeyId" ) ).toBe( 0 );
+			} );
+
+			it( "stays one-way for a host without the reply methods", () => {
+				var oneWay = buildInbox( new tests.helpers.StubHost() );
+				var note   = createNote( "n16" );
+				var body   = jsonSerialize( note );
+				var result = oneWay.handle( "POST", "/inbox", signedHeaders( body, ALICE ), body );
+				expect( result.reason ).toBe( "ignored Create" );
+				expect( remoteActors.$count( "forKeyId" ) ).toBe( 0 );
+			} );
+
+		} );
+
+		describe( "Replies.stripLocalMentions", () => {
+
+			it( "removes Mastodon's h-card mention of a local account and nothing else", () => {
+				var replies = buildReplies( new tests.helpers.ReplyHost() );
+				var tags    = [ { type : "Mention", href : "https://site.example/u/robert", name : "@robert@site.example" } ];
+				var html    = '<p><span class="h-card" translate="no"><a href="https://site.example/" class="u-url mention">@<span>robert</span></a></span> hi <span class="h-card"><a href="https://other.example/@bob" class="u-url mention">@<span>bob</span></a></span></p>';
+				expect( replies.stripLocalMentions( html, tags ) ).toBe( '<p>hi <span class="h-card"><a href="https://other.example/@bob" class="u-url mention">@<span>bob</span></a></span></p>' );
+			} );
+
+			it( "leaves content alone when no local account is mentioned", () => {
+				var replies = buildReplies( new tests.helpers.ReplyHost() );
+				expect( replies.stripLocalMentions( "<p>@robert hi</p>", [] ) ).toBe( "<p>@robert hi</p>" );
+			} );
+
+		} );
+	}
+
+	// ---- helpers -------------------------------------------------------------
+
+	private function buildReplies( required host ) {
+		variables.remoteActors = createEmptyMock( "models.RemoteActors" )
+			.$( "forKeyId" ).$callback( ( keyId, refresh, allowStale ) => remoteFor( listFirst( keyId, "##" ) ) );
+		remoteActors.$( "firstLink" ).$callback( ( value ) => new models.RemoteActors( createEmptyMock( "models.HttpClient" ), createEmptyMock( "models.Actors" ), "unused" ).firstLink( value ) );
+		var actors = new models.Actors( host, sigs, db.dsn() );
+		return new models.Replies(
+			host          = host,
+			actors        = actors,
+			remoteObjects = new models.RemoteObjects( db.dsn() ),
+			remoteActors  = remoteActors,
+			followers     = new models.Followers( db.dsn() ),
+			vocab         = new models.Vocab()
+		);
+	}
+
+	private function buildInbox( required host ) {
+		var replies = buildReplies( host );
+		return new models.Inbox(
+			signatures   = sigs,
+			remoteActors = remoteActors,
+			actors       = new models.Actors( host, sigs, db.dsn() ),
+			followers    = new models.Followers( db.dsn() ),
+			activities   = createEmptyMock( "models.Activities" ),
+			delivery     = createEmptyMock( "models.Delivery" ),
+			vocab        = new models.Vocab(),
+			replies      = replies
+		);
+	}
+
+	private struct function remoteFor( required string actorUrl ) {
+		var name = listLast( actorUrl, "/" );
+		return {
+			id             : actorUrl == ALICE ? "55555555-5555-5555-5555-555555555555" : "66666666-6666-6666-6666-666666666666",
+			actorUrl       : actorUrl,
+			inboxUrl       : actorUrl & "/inbox",
+			sharedInboxUrl : "https://remote.example/inbox",
+			publicKeyId    : actorUrl & "##main-key",
+			publicKeyPem   : keys[ actorUrl ].publicKeyPem,
+			name           : uCase( left( name, 1 ) ) & mid( name, 2, 100 ),
+			handle         : "@#name#@remote.example",
+			profileUrl     : "https://remote.example/@#name#",
+			avatarUrl      : "",
+			fromCache      : false
+		};
+	}
+
+	/**
+	 * A public reply to POST_URL, shaped like the one Mastodon sent.
+	 */
+	private struct function createNote( required string suffix ) {
+		var noteId = "#ALICE#/statuses/#suffix#";
+		var to     = [ PUBLIC ];
+		var cc     = [ "#ALICE#/followers", "https://site.example/u/robert" ];
+		return {
+			"@context" : [ "https://www.w3.org/ns/activitystreams" ],
+			id         : noteId & "/activity",
+			type       : "Create",
+			actor      : ALICE,
+			published  : "2026-09-28T17:17:29Z",
+			to         : to,
+			cc         : cc,
+			object     : {
+				id           : noteId,
+				type         : "Note",
+				summary      : javacast( "null", "" ),
+				inReplyTo    : POST_URL,
+				published    : "2026-09-28T17:17:29Z",
+				url          : "https://remote.example/@alice/#suffix#",
+				attributedTo : ALICE,
+				to           : to,
+				cc           : cc,
+				sensitive    : false,
+				content      : '<p><span class="h-card" translate="no"><a href="https://site.example/" class="u-url mention">@<span>robert</span></a></span> neat</p>',
+				attachment   : [],
+				tag          : [ { type : "Mention", href : "https://site.example/u/robert", name : "@robert@site.example" } ]
+			}
+		};
+	}
+
+	private struct function deleteOf( required string objectId, required string actor ) {
+		return {
+			"@context" : "https://www.w3.org/ns/activitystreams",
+			id         : objectId & "##delete",
+			type       : "Delete",
+			actor      : actor,
+			to         : [ PUBLIC ],
+			object     : objectId == actor ? objectId : { id : objectId, type : "Tombstone" }
+		};
+	}
+
+	private struct function post( required struct activity, string signer = ALICE ) {
+		var body = jsonSerialize( activity );
+		return inbox.handle( "POST", "/inbox", signedHeaders( body, signer ), body.getBytes( "UTF-8" ) );
+	}
+
+	private struct function signedHeaders( required string body, required string signer ) {
+		var headers = { "host" : "site.example", "date" : sigs.httpDate(), "digest" : sigs.digest( body ) };
+		headers[ "signature" ] = sigs.sign( "POST", "/inbox", headers, keys[ signer ].privateKeyPem, signer & "##main-key" );
+		return headers;
+	}
+
+	private array function remoteObjectUrls() {
+		return db.rows( "SELECT ObjectUrl FROM ApRemoteObject ORDER BY CreatedAt" ).map( ( r ) => r.ObjectUrl );
+	}
+
+}
