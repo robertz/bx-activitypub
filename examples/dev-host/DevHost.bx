@@ -1,7 +1,7 @@
 /**
  * Milestone 1-2 stand-in for the real host app: hardcoded actors and one post.
  */
-class {
+class implements="bxactivitypub.contracts.IHostApp" {
 
 	variables.ACTORS = {
 		"Group" : {
@@ -50,6 +50,10 @@ class {
 
 	function getObject( required string type, required string id ) {
 		return type == "post" ? ( variables.POSTS[ id ] ?: javacast( "null", "" ) ) : javacast( "null", "" );
+	}
+
+	boolean function isPublic( required string type, required string id ) {
+		return true;
 	}
 
 	string function postId() {

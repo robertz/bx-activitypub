@@ -58,7 +58,8 @@ class {
 
 	private function actorRoute( req, res, next ) {
 		if ( !wantsActivityJson( req ) ) {
-			return next();
+			var htmlUrl = variables.ap.actorHtmlUrl( typeFromPath( req.path ), req.params.name );
+			return len( htmlUrl ) ? res.redirect( htmlUrl, 302 ) : next();
 		}
 		var doc = variables.ap.actorDocument( typeFromPath( req.path ), req.params.name );
 		if ( isNull( doc ) ) {

@@ -118,6 +118,13 @@ class extends="testbox.system.BaseSpec" {
 				expect( post( activity ).status ).toBe( 404 );
 			} );
 
+			it( "returns 404 for a Follow of a non-public local actor", () => {
+				var activity    = follow();
+				activity.object = "https://site.example/u/hidden";
+				expect( post( activity ).status ).toBe( 404 );
+				expect( followers.$count( "add" ) ).toBe( 0 );
+			} );
+
 			it( "returns 404 for a Follow of a remote actor", () => {
 				var activity    = follow();
 				activity.object = "https://elsewhere.example/c/general";

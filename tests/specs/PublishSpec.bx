@@ -59,6 +59,31 @@ class extends="testbox.system.BaseSpec" {
 				expect( () => ap.publishPost( "0192a6f0-0000-7000-8000-000000000102" ) ).toThrow( "BxActivityPub.NotFound" );
 			} );
 
+			it( "never lets a non-public post into ApDelivery or ApActivity", () => {
+				addFollower( "https://a.example/u/1", "https://a.example/u/1/inbox", "https://a.example/inbox" );
+				expect( () => ap.publishPost( "0192a6f0-0000-7000-8000-000000000103" ) ).toThrow( "BxActivityPub.NotPublic" );
+				expect( db.rows( "SELECT COUNT(*) AS N FROM ApDelivery" )[ 1 ].N ).toBe( 0 );
+				expect( db.rows( "SELECT COUNT(*) AS N FROM ApActivity" )[ 1 ].N ).toBe( 0 );
+			} );
+
+			it( "does not serve or redirect to a non-public post", () => {
+				expect( isNull( ap.objectDocument( "post", "0192a6f0-0000-7000-8000-000000000103" ) ) ).toBeTrue();
+				expect( ap.objectHtmlUrl( "post", "0192a6f0-0000-7000-8000-000000000103" ) ).toBe( "" );
+			} );
+
+			it( "hides a non-public Person from WebFinger, actor documents and collections", () => {
+				expect( isNull( ap.webfinger( "acct:hidden@site.example" ) ) ).toBeTrue();
+				expect( isNull( ap.actorDocument( "Person", "hidden" ) ) ).toBeTrue();
+				expect( isNull( ap.followersCollection( "Person", "hidden" ) ) ).toBeTrue();
+				expect( isNull( ap.webfinger( "acct:robert@site.example" ) ) ).toBeFalse();
+			} );
+
+			it( "points the actor document and browsers at the host's profile page", () => {
+				expect( ap.actorDocument( "Person", "robert" ).url ).toBe( "https://site.example/about" );
+				expect( ap.actorHtmlUrl( "Person", "robert" ) ).toBe( "https://site.example/about" );
+				expect( ap.actorHtmlUrl( "Person", "hidden" ) ).toBe( "" );
+			} );
+
 			it( "serves the same Article at its id", () => {
 				var doc = ap.objectDocument( "post", POST_ID );
 				expect( doc[ "@context" ] ).toBe( "https://www.w3.org/ns/activitystreams" );

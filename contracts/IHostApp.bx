@@ -1,0 +1,33 @@
+/**
+ * What a host app implements so bx-activitypub can federate its content. The module
+ * never reads the host's tables; everything goes through these methods.
+ *
+ * Types: "Person", "Group" (actors) and "post" (objects).
+ */
+interface {
+
+	/**
+	 * Canonical origin, e.g. "https://kisdigital.com". Actor and object ids are built from it.
+	 */
+	string function baseUrl();
+
+	/**
+	 * { id, name, displayName, summary, avatar, url } or null. id is the host's UUID for the
+	 * actor (the module keys keypairs and followers by it); name is the WebFinger handle;
+	 * url (optional) is the actor's HTML profile page.
+	 */
+	function findActor( required string type, required string name );
+
+	/**
+	 * For "post": { author (Person name), title, summary, content (HTML), url (HTML page),
+	 * published (date) } or null.
+	 */
+	function getObject( required string type, required string id );
+
+	/**
+	 * Whether this actor or object may be federated at all. Checked before every
+	 * dereference and every delivery; false means the module behaves as if it doesn't exist.
+	 */
+	boolean function isPublic( required string type, required string id );
+
+}

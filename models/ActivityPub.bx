@@ -3,10 +3,8 @@
  *
  *   ap = new bxactivitypub.models.ActivityPub( host = myHost, settings = { datasource : "mydsn" } );
  *
- * host must provide:
- *   baseUrl()
- *   findActor( type, name ) -> { id, name, displayName, summary, avatar } or null
- *   getObject( "post", id ) -> { author (Person name), title, summary, content (HTML), url, published (date) } or null
+ * host implements contracts/IHostApp.bx. isPublic() gates every actor and object lookup,
+ * so a non-public actor or post is never served, followed or delivered.
  *
  * settings:
  *   datasource        (required) where the Ap* tables live
@@ -57,9 +55,12 @@ class {
 	 * Create is a no-op; changes to it go out as Update.
 	 */
 	struct function publishPost( required string postId ) {
-		var post = variables.host.getObject( "post", postId );
-		if ( isNull( post ) ) {
+		if ( isNull( variables.host.getObject( "post", postId ) ) ) {
 			throw( type = "BxActivityPub.NotFound", message = "Host has no post [#postId#]" );
+		}
+		var post = publicPost( postId );
+		if ( isNull( post ) ) {
+			throw( type = "BxActivityPub.NotPublic", message = "Post [#postId#] is not public" );
 		}
 		var author = variables.actors.findActor( "Person", post.author );
 		if ( isNull( author ) ) {
@@ -92,7 +93,7 @@ class {
 		if ( kind != "post" ) {
 			return javacast( "null", "" );
 		}
-		var post = variables.host.getObject( "post", id );
+		var post = publicPost( id );
 		if ( isNull( post ) ) {
 			return javacast( "null", "" );
 		}
@@ -110,8 +111,16 @@ class {
 		if ( kind != "post" ) {
 			return "";
 		}
-		var post = variables.host.getObject( "post", id );
+		var post = publicPost( id );
 		return isNull( post ) ? "" : ( post.url ?: "" );
+	}
+
+	/**
+	 * The actor's HTML profile page, or "" (for redirecting browsers from the actor id).
+	 */
+	string function actorHtmlUrl( required string type, required string name ) {
+		var actor = variables.actors.findActor( type, name );
+		return isNull( actor ) ? "" : ( actor.url ?: "" );
 	}
 
 	function webfinger( required string resource ) {
@@ -155,6 +164,17 @@ class {
 			"type"       : "OrderedCollection",
 			"totalItems" : variables.followers.count( type, actor.id )
 		];
+	}
+
+	/**
+	 * The host's post, or null when it doesn't exist or isn't public.
+	 */
+	private function publicPost( required string id ) {
+		var post = variables.host.getObject( "post", id );
+		if ( isNull( post ) || !variables.host.isPublic( "post", id ) ) {
+			return javacast( "null", "" );
+		}
+		return post;
 	}
 
 	private struct function buildArticle( required string postId, required struct post, required struct author ) {

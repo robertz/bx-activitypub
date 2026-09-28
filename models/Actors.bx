@@ -49,13 +49,18 @@ class {
 	}
 
 	/**
-	 * The host's actor struct (id, name, displayName, summary, avatar) or null.
+	 * The host's actor struct (id, name, displayName, summary, avatar), or null when it
+	 * doesn't exist or the host says it isn't public.
 	 */
 	function findActor( required string type, required string name ) {
 		if ( !variables.PATHS.keyExists( type ) ) {
 			return javacast( "null", "" );
 		}
-		return variables.host.findActor( type, name );
+		var actor = variables.host.findActor( type, name );
+		if ( isNull( actor ) || !variables.host.isPublic( type, actor.id ) ) {
+			return javacast( "null", "" );
+		}
+		return actor;
 	}
 
 	/**
@@ -91,7 +96,7 @@ class {
 			"preferredUsername"         : actor.name,
 			"name"                      : actor.displayName ?: actor.name,
 			"summary"                   : actor.summary ?: "",
-			"url"                       : id,
+			"url"                       : len( actor.url ?: "" ) ? actor.url : id,
 			"inbox"                     : id & "/inbox",
 			"outbox"                    : id & "/outbox",
 			"followers"                 : id & "/followers",

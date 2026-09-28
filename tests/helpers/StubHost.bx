@@ -1,8 +1,11 @@
-class {
+class implements="contracts.IHostApp" {
 
 	variables.ACTORS = {
 		"Group"  : { "general" : { id : "0192a6f0-0000-7000-8000-000000000001", name : "general", displayName : "General", summary : "" } },
-		"Person" : { "robert" : { id : "0192a6f0-0000-7000-8000-000000000002", name : "robert", displayName : "Robert", summary : "" } }
+		"Person" : {
+			"robert" : { id : "0192a6f0-0000-7000-8000-000000000002", name : "robert", displayName : "Robert", summary : "", url : "https://site.example/about" },
+			"hidden" : { id : "0192a6f0-0000-7000-8000-000000000004", name : "hidden", displayName : "Hidden", summary : "" }
+		}
 	};
 
 	variables.POSTS = {
@@ -12,6 +15,14 @@ class {
 			summary   : "First post",
 			content   : "<p>Body</p>",
 			url       : "https://site.example/posts/2026/09/hello",
+			published : createDateTime( 2026, 9, 28, 12, 0, 0 )
+		},
+		"0192a6f0-0000-7000-8000-000000000103" : {
+			author    : "robert",
+			title     : "Draft",
+			summary   : "Not yet",
+			content   : "<p>Secret</p>",
+			url       : "https://site.example/posts/2026/09/draft",
 			published : createDateTime( 2026, 9, 28, 12, 0, 0 )
 		},
 		"0192a6f0-0000-7000-8000-000000000102" : {
@@ -26,6 +37,13 @@ class {
 
 	function getObject( required string type, required string id ) {
 		return type == "post" ? ( variables.POSTS[ id ] ?: javacast( "null", "" ) ) : javacast( "null", "" );
+	}
+
+	// The draft post and the inactive Person "hidden" are not public.
+	variables.PRIVATE_IDS = [ "0192a6f0-0000-7000-8000-000000000103", "0192a6f0-0000-7000-8000-000000000004" ];
+
+	boolean function isPublic( required string type, required string id ) {
+		return !variables.PRIVATE_IDS.contains( id );
 	}
 
 	string function baseUrl() {
