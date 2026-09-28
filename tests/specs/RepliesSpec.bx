@@ -95,6 +95,28 @@ class extends="testbox.system.BaseSpec" {
 				expect( call.parentId ).toBe( "comment-1" );
 			} );
 
+			it( "threads a reply to a local comment under it", () => {
+				host.putComment( "local-1", { author : "robert", postId : POST_ID, parentId : "comment-1", content : "<p>hi</p>", url : "", published : now() } );
+				var note = createNote( "n20" );
+				note.object.inReplyTo = "https://site.example/comment/local-1";
+				expect( post( note ).reason ).toBe( "accepted reply" );
+				var call = host.calls().accept[ 1 ];
+				expect( call.postId ).toBe( POST_ID );
+				expect( call.parentId ).toBe( "local-1" );
+			} );
+
+			it( "ignores a reply to a local comment that isn't public", () => {
+				host.putComment( "local-2", { author : "robert", postId : POST_ID, parentId : "comment-1", content : "<p>hi</p>", url : "", published : now() } );
+				host.setPublic( "local-2", false );
+				var note = createNote( "n21" );
+				note.object.inReplyTo = "https://site.example/comment/local-2";
+				expect( post( note ).reason ).toBe( "ignored reply to a non-public comment" );
+				note.object.inReplyTo = "https://site.example/comment/nope";
+				note.object.id = "#ALICE#/statuses/n22";
+				expect( post( note ).reason ).toBe( "ignored reply to a non-public comment" );
+				expect( host.calls().accept ).toBeEmpty();
+			} );
+
 			it( "accepts the same reply only once", () => {
 				post( createNote( "n9" ) );
 				expect( post( createNote( "n9" ) ).reason ).toBe( "reply already accepted" );

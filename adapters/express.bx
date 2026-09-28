@@ -34,6 +34,7 @@ class {
 		}
 
 		app.get( "/post/:id", ( req, res, next ) => objectRoute( req, res, next, "post" ) );
+		app.get( "/comment/:id", ( req, res, next ) => objectRoute( req, res, next, "comment" ) );
 		app.get( "/activities/:type/:uuid", ( req, res, next ) => activityRoute( req, res, next ) );
 
 		var intervalMs = options.deliveryIntervalMs ?: 5000;

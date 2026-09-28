@@ -2,7 +2,7 @@
  * What a host app implements so bx-activitypub can federate its content. The module
  * never reads the host's tables; everything goes through these methods.
  *
- * Types: "Person", "Group" (actors) and "post" (objects).
+ * Types: "Person", "Group" (actors), "post" and, optionally, "comment" (objects).
  */
 interface {
 
@@ -24,6 +24,11 @@ interface {
 	 * published (date), tags (optional) } or null. tags is an array of { name, url }: sent as
 	 * hashtags (name reduced to letters, digits and underscores), url being the host's page
 	 * for the tag.
+	 *
+	 * For "comment" (optional, for replying back with ActivityPub.syncComment()): { author
+	 * (Person name it goes out as), postId, parentId (the host's id of the comment it answers,
+	 * "" for top level), content (HTML), url (HTML page), published (date) } or null. A host
+	 * that returns null for every comment never replies back.
 	 */
 	function getObject( required string type, required string id );
 

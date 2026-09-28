@@ -1,0 +1,173 @@
+/**
+ * Replying back: syncComment() sends local replies in fediverse threads as Notes.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	variables.POST_ID    = "0192a6f0-0000-7000-8000-000000000101";
+	variables.DRAFT_ID   = "0192a6f0-0000-7000-8000-000000000103";
+	variables.PERSON_ID  = "0192a6f0-0000-7000-8000-000000000002";
+	variables.ALICE      = "https://remote.example/users/alice";
+	variables.ALICE_NOTE = "https://remote.example/users/alice/statuses/n1";
+	variables.PUBLIC     = "https://www.w3.org/ns/activitystreams##Public";
+	variables.FOLLOWERS  = "https://site.example/u/robert/followers";
+
+	function beforeAll() {
+		variables.db = new tests.helpers.TestDb();
+		db.reset();
+	}
+
+	function run() {
+		describe( "syncComment", () => {
+
+			beforeEach( () => {
+				db.rows( "SET FOREIGN_KEY_CHECKS = 0; DELETE FROM ApDelivery; DELETE FROM ApActivity; DELETE FROM ApFollower; DELETE FROM ApRemoteActor; DELETE FROM ApRemoteObject; SET FOREIGN_KEY_CHECKS = 1;" );
+				variables.host = new tests.helpers.StubHost();
+				variables.ap   = new models.ActivityPub( host = host, settings = { datasource : db.dsn() } );
+				addFollower();
+				addAlicesReply();
+				host.putComment( "c1", comment( "remote-1", "<p>Thanks!</p>" ) );
+			} );
+
+			it( "sends a reply to a remote reply as a Note that mentions its author", () => {
+				var result = ap.syncComment( "c1" );
+				expect( result.action ).toBe( "create" );
+				expect( result.queued ).toBe( 2 );
+				expect( inboxes() ).toBe( [ "https://a.example/inbox", "https://remote.example/inbox" ] );
+
+				var create = jsonDeserialize( ap.activityJson( "create", result.activityId ) );
+				expect( create.actor ).toBe( "https://site.example/u/robert" );
+				var note = create.object;
+				expect( note.id ).toBe( "https://site.example/comment/c1" );
+				expect( note.type ).toBe( "Note" );
+				expect( note.attributedTo ).toBe( "https://site.example/u/robert" );
+				expect( note.inReplyTo ).toBe( ALICE_NOTE );
+				expect( note.to ).toBe( [ PUBLIC ] );
+				expect( note.cc ).toBe( [ FOLLOWERS, ALICE ] );
+				expect( note.tag ).toBe( [ { type : "Mention", href : ALICE, name : "@alice@remote.example" } ] );
+				expect( note.content ).toBe( '<p><span class="h-card" translate="no"><a href="https://remote.example/@alice" class="u-url mention">@<span>alice</span></a></span> Thanks!</p>' );
+				expect( note.url ).toBe( "https://site.example/posts/2026/09/hello##comments" );
+				expect( note.published ).toBe( "2026-09-28T18:00:00Z" );
+				expect( create.cc ).toBe( [ FOLLOWERS, ALICE ] );
+
+				expect( ap.syncComment( "c1" ).action ).toBe( "none" );
+			} );
+
+			it( "sends one copy when the mentioned author's server is also a follower's", () => {
+				db.rows( "UPDATE ApRemoteActor SET SharedInboxUrl = 'https://a.example/inbox' WHERE ActorUrl = :actor", { actor : ALICE } );
+				expect( ap.syncComment( "c1" ).queued ).toBe( 1 );
+			} );
+
+			it( "never sends a top-level comment, or a reply in a thread with no one from the fediverse", () => {
+				host.putComment( "top", comment( "", "<p>First!</p>" ) );
+				host.putComment( "local", comment( "top", "<p>Agreed</p>" ) );
+				expect( ap.syncComment( "top" ).action ).toBe( "none" );
+				expect( ap.syncComment( "local" ).action ).toBe( "none" );
+				expect( ap.syncComment( "missing" ).action ).toBe( "none" );
+				expect( inboxes() ).toBeEmpty();
+			} );
+
+			it( "never sends a comment the host says isn't public, or one on a non-public post", () => {
+				host.setPublic( "c1", false );
+				expect( ap.syncComment( "c1" ).action ).toBe( "none" );
+				var onDraft = comment( "remote-1", "<p>Hi</p>" );
+				onDraft.postId = DRAFT_ID;
+				host.putComment( "c2", onDraft );
+				expect( ap.syncComment( "c2" ).action ).toBe( "none" );
+				expect( inboxes() ).toBeEmpty();
+			} );
+
+			it( "threads a reply to a sent local reply under it, keeping its mentions", () => {
+				ap.syncComment( "c1" );
+				host.putComment( "c2", comment( "c1", "<p>Also...</p>" ) );
+				var result = ap.syncComment( "c2" );
+				expect( result.action ).toBe( "create" );
+				var note = jsonDeserialize( ap.activityJson( "create", result.activityId ) ).object;
+				expect( note.inReplyTo ).toBe( "https://site.example/comment/c1" );
+				expect( note.cc ).toBe( [ FOLLOWERS, ALICE ] );
+				expect( note.tag[ 1 ].href ).toBe( ALICE );
+			} );
+
+			it( "sends an Update when the content changes", () => {
+				ap.syncComment( "c1" );
+				host.putComment( "c1", comment( "remote-1", "<p>Thanks a lot!</p>" ) );
+				var result = ap.syncComment( "c1" );
+				expect( result.action ).toBe( "update" );
+				var update = jsonDeserialize( ap.activityJson( "update", result.activityId ) );
+				expect( update.object.content ).toInclude( "Thanks a lot!" );
+				expect( update.object.updated ).toMatch( "^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$" );
+				expect( update.cc ).toBe( [ FOLLOWERS, ALICE ] );
+				expect( ap.objectDocument( "comment", "c1" ).updated ).toBe( update.object.updated );
+				expect( ap.syncComment( "c1" ).action ).toBe( "none" );
+			} );
+
+			it( "deletes a sent reply that is no longer public, telling the mentioned author too", () => {
+				ap.syncComment( "c1" );
+				db.rows( "DELETE FROM ApDelivery" );
+				host.setPublic( "c1", false );
+				var result = ap.syncComment( "c1" );
+				expect( result.action ).toBe( "delete" );
+				expect( inboxes() ).toBe( [ "https://a.example/inbox", "https://remote.example/inbox" ] );
+				var del = jsonDeserialize( ap.activityJson( "delete", result.activityId ) );
+				expect( del.object ).toBe( { id : "https://site.example/comment/c1", type : "Tombstone" } );
+				expect( del.cc ).toBe( [ FOLLOWERS, ALICE ] );
+
+				var doc = ap.objectDocument( "comment", "c1" );
+				expect( doc.type ).toBe( "Tombstone" );
+				expect( doc.formerType ).toBe( "Note" );
+				host.setPublic( "c1", true );
+				expect( ap.syncComment( "c1" ).action ).toBe( "none" );
+			} );
+
+			it( "serves only comments that went out", () => {
+				expect( isNull( ap.objectDocument( "comment", "c1" ) ) ).toBeTrue();
+				expect( ap.objectHtmlUrl( "comment", "top" ) ).toBe( "" );
+				ap.syncComment( "c1" );
+				expect( ap.objectDocument( "comment", "c1" ).type ).toBe( "Note" );
+				expect( ap.objectHtmlUrl( "comment", "c1" ) ).toBe( "https://site.example/posts/2026/09/hello##comments" );
+			} );
+
+			it( "lists federated comment ids until they are deleted", () => {
+				ap.syncComment( "c1" );
+				expect( ap.federatedCommentIds() ).toBe( [ "c1" ] );
+				expect( ap.federatedPostIds() ).toBe( [] );
+				host.setPublic( "c1", false );
+				ap.syncComment( "c1" );
+				expect( ap.federatedCommentIds() ).toBe( [] );
+			} );
+
+		} );
+	}
+
+	private struct function comment( required string parentId, required string content ) {
+		return {
+			author    : "robert",
+			postId    : POST_ID,
+			parentId  : parentId,
+			content   : content,
+			url       : "https://site.example/posts/2026/09/hello##comments",
+			published : createDateTime( 2026, 9, 28, 14, 0, 0 )
+		};
+	}
+
+	private array function inboxes() {
+		return db.rows( "SELECT InboxUrl FROM ApDelivery ORDER BY InboxUrl" ).map( ( row ) => row.InboxUrl );
+	}
+
+	private void function addFollower() {
+		db.rows( "INSERT INTO ApRemoteActor (Id, ActorUrl, InboxUrl, SharedInboxUrl, PublicKeyId, PublicKeyPem) VALUES (UUID_TO_BIN('44444444-4444-4444-4444-444444444444'), 'https://a.example/u/1', 'https://a.example/u/1/inbox', 'https://a.example/inbox', 'k', 'p')" );
+		db.rows( "INSERT INTO ApFollower (ActorType, LocalId, RemoteActorId, InboxUrl, SharedInboxUrl, FollowActivityId) VALUES ('Person', UUID_TO_BIN(:localId), UUID_TO_BIN('44444444-4444-4444-4444-444444444444'), 'https://a.example/u/1/inbox', 'https://a.example/inbox', 'f')", { localId : PERSON_ID } );
+	}
+
+	/**
+	 * Alice replied to the post from Mastodon and the host stored it as "remote-1".
+	 */
+	private void function addAlicesReply() {
+		db.rows(
+			"INSERT INTO ApRemoteActor (ActorUrl, InboxUrl, SharedInboxUrl, PublicKeyId, PublicKeyPem, Name, Handle, ProfileUrl, FetchedAt)
+			 VALUES (:actor, :inbox, 'https://remote.example/inbox', :keyId, 'p', 'Alice', '@alice@remote.example', 'https://remote.example/@alice', NOW(3) - INTERVAL 30 DAY)",
+			{ actor : ALICE, inbox : ALICE & "/inbox", keyId : ALICE & "##main-key" }
+		);
+		new models.RemoteObjects( db.dsn() ).add( ALICE_NOTE, ALICE, POST_ID, "remote-1" );
+	}
+
+}

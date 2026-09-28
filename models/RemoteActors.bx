@@ -33,6 +33,14 @@ class {
 		return remote;
 	}
 
+	/**
+	 * A remote actor for addressing (inbox, handle): the cached copy however old, else fetched.
+	 */
+	struct function lookup( required string actorUrl ) {
+		var cached = read( actorUrl, false );
+		return isNull( cached ) ? fetchAndStore( actorUrl ) : cached;
+	}
+
 	struct function fetchAndStore( required string actorUrl ) {
 		var signer   = variables.actors.instanceSigner();
 		var response = variables.http.signedGet( actorUrl, signer.keyId, signer.privateKeyPem );

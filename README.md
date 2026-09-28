@@ -4,7 +4,7 @@ Outbound [ActivityPub](https://www.w3.org/TR/activitypub/) federation for BoxLan
 
 Your app keeps its data; the module handles the protocol: WebFinger, actor documents, HTTP Signatures, the inbox, a delivery queue that survives restarts, and NodeInfo.
 
-**Status: 0.4.0.** Author mode (an account publishing `Article`s) is complete and verified against Mastodon. Posts carry their tags as hashtags. The module counts **likes and boosts** of your posts, and your app can accept **public replies** to them, with their edits and deletions, by implementing an optional second contract. Everything else inbound is acknowledged and ignored.
+**Status: 0.5.0.** Author mode (an account publishing `Article`s) is complete and verified against Mastodon. Posts carry their tags as hashtags. The module counts **likes and boosts** of your posts, and your app can accept **public replies** to them, with their edits and deletions, by implementing an optional second contract, and **reply back** to them as the account. Everything else inbound is acknowledged and ignored.
 
 ## Requirements
 
@@ -29,7 +29,7 @@ mysql your_database < boxlang_modules/bx-activitypub/sql/schema.sql
 
 The module adds seven `Ap*` tables and never reads or writes any of yours. Its classes are available as `bxModules.bxactivitypub.*`.
 
-**Upgrading:** from 0.1.x run `sql/upgrade-0.2.0.sql`, then (from anything before 0.4.0) `sql/upgrade-0.4.0.sql`, once each.
+**Upgrading:** from 0.1.x run `sql/upgrade-0.2.0.sql`, then (from anything before 0.4.0) `sql/upgrade-0.4.0.sql`, then (from anything before 0.5.0) `sql/upgrade-0.5.0.sql`, once each.
 
 ## How it fits together
 
@@ -43,14 +43,15 @@ your app ── IHostApp ──> bx-activitypub ──> signed HTTP ──> Mast
 
 ### The `IHostApp` contract
 
-Types are `"Person"` and `"Group"` for accounts, and `"post"` for posts.
+Types are `"Person"` and `"Group"` for accounts, `"post"` for posts and, if you reply back, `"comment"` for comments.
 
 | Method | Returns |
 |---|---|
 | `baseUrl()` | Your canonical origin, e.g. `"https://example.com"`. Account and post ids are built from it. |
 | `findActor( type, name )` | `{ id, name, displayName, summary, avatar, header, url }` or `null`. `id` is your UUID for the account (keypairs and followers are keyed by it); `name` is the handle, as in `@name@host`; `summary` is HTML; `avatar`, `header` (the profile banner; Mastodon crops it to about 3:1) and `url` (the profile page) are optional absolute URLs. |
 | `getObject( "post", id )` | `{ author, title, summary, content, url, published, tags }` or `null`. `author` is the Person's `name`; `content` is HTML; `url` is the post's page; `published` is a date; `tags` (optional) is an array of `{ name, url }`, sent as hashtags so posts appear in Mastodon's hashtag timelines on the servers that receive them. Names are reduced to letters, digits and underscores. |
-| `isPublic( type, id )` | Whether this account or post may be federated at all. Checked before every lookup, serving and delivery; `false` means the module behaves as if it doesn't exist. Return `false` for drafts, private content and inactive accounts. |
+| `getObject( "comment", id )` | Optional, for [replying back](#replying-back): `{ author, postId, parentId, content, url, published }` or `null`. `author` is the Person's `name` it goes out as; `parentId` is your id of the comment it answers (`""` for top level); `content` is HTML. Return `null` for every comment to never reply back. |
+| `isPublic( type, id )` | Whether this account, post or comment may be federated at all. Checked before every lookup, serving and delivery; `false` means the module behaves as if it doesn't exist. Return `false` for drafts, private content and inactive accounts. |
 
 ### Optional: `IRemoteReplies`
 
@@ -198,6 +199,14 @@ A typical app runs a scheduled sweep: `syncPost` for its recent posts plus `fede
 
 **Some things are permanent.** Choose your hostname and handles before you federate for real: changing either orphans every follower. A post's id belongs forever to the account that first published it. A deleted post's id stays deleted: Mastodon won't accept it again, even if you republish the post.
 
+### Replying back
+
+`syncComment( id )` does for a comment what `syncPost` does for a post: `Create`, `Update` (content changed) or `Delete`, as a `Note` from its author's account. Only replies in fediverse threads go out: a comment answering a remote reply you accepted, or a comment answering one of your own that went out. Top-level comments and threads with no one from the fediverse stay home. The remote author being answered is mentioned, so their server notifies them, and gets it in their own inbox as well as the account's followers. `federatedCommentIds()` lists the comments currently on the fediverse, for a sweep.
+
+Replies to your comments from the fediverse arrive through `acceptRemoteReply` with `parentId` set to your comment's id.
+
+**Whatever goes out goes out under the account's name.** If other people can comment on your site, anything they write in reply to a fediverse commenter can go out as the account; hold those for approval (answer `isPublic( "comment", id )` with `false` until approved) if you don't want that.
+
 ### Likes and boosts
 
 `reactionCounts( "post", id )` returns `{ likes, boosts }` for a post: likes and boosts from the fediverse are verified, stored once per account, removed when someone un-likes or un-boosts, and removed when their account is deleted.
@@ -216,6 +225,7 @@ The express adapter mounts these. Account and post routes answer ActivityPub req
 | GET | `/u/{name}/outbox`, `/c/{name}/outbox` | Empty collection |
 | GET | `/u/{name}/followers`, `/c/{name}/followers` | Follower count only |
 | GET | `/post/{id}` | Posts |
+| GET | `/comment/{id}` | Comments that went out |
 | GET | `/activities/{type}/{uuid}` | Every activity that was sent |
 
 `mount( app, ap, options )` options: `maxInboxBytes` (default 262144), `deliveryIntervalMs` (default 5000; `0` to schedule the delivery worker yourself with `ap.processDeliveries()`).

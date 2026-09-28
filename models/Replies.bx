@@ -5,7 +5,8 @@
  *   - only public replies (Public in to/cc); a followers-only reply or a direct message is
  *     dropped, never passed on
  *   - the Note's attributedTo must be the (signature-verified) actor
- *   - inReplyTo must be a public local post, or a reply the host already accepted
+ *   - inReplyTo must be a public local post, a reply the host already accepted, or a public
+ *     local comment (one that went out through syncComment())
  *   - edits and deletions apply only to a reply the same actor sent; Delete{Person}
  *     removes all of that actor's replies and follows
  *
@@ -53,7 +54,7 @@ class {
 		}
 		if ( type == "Create" ) {
 			var target = variables.vocab.idOf( obj.inReplyTo ?: "" );
-			return len( localPostId( target ) ) || !isNull( variables.remoteObjects.find( target ) );
+			return len( localPostId( target ) ) || len( localCommentId( target ) ) || !isNull( variables.remoteObjects.find( target ) );
 		}
 		return false;
 	}
@@ -114,10 +115,18 @@ class {
 			return result( 202, "reply already accepted" );
 		}
 
-		var target   = variables.vocab.idOf( obj.inReplyTo ?: "" );
-		var postId   = localPostId( target );
-		var parentId = "";
-		if ( !len( postId ) ) {
+		var target    = variables.vocab.idOf( obj.inReplyTo ?: "" );
+		var postId    = localPostId( target );
+		var parentId  = "";
+		var commentId = localCommentId( target );
+		if ( len( commentId ) ) {
+			var comment = variables.host.getObject( "comment", commentId );
+			if ( isNull( comment ) || !variables.host.isPublic( "comment", commentId ) ) {
+				return result( 202, "ignored reply to a non-public comment" );
+			}
+			postId   = comment.postId;
+			parentId = commentId;
+		} else if ( !len( postId ) ) {
 			var parent = variables.remoteObjects.find( target );
 			if ( isNull( parent ) ) {
 				return result( 202, "ignored reply to unknown object" );
@@ -238,6 +247,10 @@ class {
 
 	private string function localPostId( required string candidate ) {
 		return variables.actors.localObjectId( "post", candidate );
+	}
+
+	private string function localCommentId( required string candidate ) {
+		return variables.actors.localObjectId( "comment", candidate );
 	}
 
 	// compare(), not ==: BoxLang's string == ignores case, and URL paths are case-sensitive.

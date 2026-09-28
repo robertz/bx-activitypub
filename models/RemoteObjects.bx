@@ -29,6 +29,14 @@ class {
 		return rows.len() ? rows[ 1 ] : javacast( "null", "" );
 	}
 
+	/**
+	 * The accepted remote object the host stored as hostId, or null.
+	 */
+	function findByHostId( required string hostId ) {
+		var rows = select( "HostId = :hostId", { hostId : { value : hostId, sqltype : "varchar" } } );
+		return rows.len() ? rows[ 1 ] : javacast( "null", "" );
+	}
+
 	array function findByActor( required string actorUrl ) {
 		return select( "ActorUrl = :actorUrl", { actorUrl : { value : actorUrl, sqltype : "varchar" } } );
 	}

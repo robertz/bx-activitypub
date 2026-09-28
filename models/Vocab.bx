@@ -54,6 +54,52 @@ class {
 	}
 
 	/**
+	 * Note for a local reply in a fediverse thread. comment: { content (HTML), url, published }.
+	 * mentions: [ { actorUrl, handle ("@user@host"), profileUrl } ], each sent as a Mention tag
+	 * (what notifies them) and cc'd, and linked at the start of the content the way Mastodon
+	 * writes mentions.
+	 */
+	struct function note(
+		required string id,
+		required string actorUrl,
+		required string followersUrl,
+		required string inReplyTo,
+		required struct comment,
+		array mentions = []
+	) {
+		var cc    = [ followersUrl ];
+		var tags  = [];
+		var links = [];
+		for ( var mention in mentions ) {
+			cc.append( mention.actorUrl );
+			tags.append( [ "type" : "Mention", "href" : mention.actorUrl, "name" : mention.handle ] );
+			var user = listFirst( mention.handle, "@" );
+			links.append( '<span class="h-card" translate="no"><a href="#escapeHtml( len( mention.profileUrl ) ? mention.profileUrl : mention.actorUrl )#" class="u-url mention">@<span>#escapeHtml( user )#</span></a></span>' );
+		}
+		var content = comment.content;
+		if ( links.len() ) {
+			var prefix = links.toList( " " ) & " ";
+			content = left( content, 3 ) == "<p>" ? "<p>" & prefix & mid( content, 4, len( content ) ) : prefix & content;
+		}
+		var doc = [
+			"@context"     : variables.AS_CONTEXT,
+			"id"           : id,
+			"type"         : "Note",
+			"attributedTo" : actorUrl,
+			"inReplyTo"    : inReplyTo,
+			"to"           : [ variables.PUBLIC ],
+			"cc"           : cc,
+			"content"      : content,
+			"url"          : comment.url,
+			"published"    : isoDate( comment.published )
+		];
+		if ( tags.len() ) {
+			doc[ "tag" ] = tags;
+		}
+		return doc;
+	}
+
+	/**
 	 * Hashtag objects for a post's tags ({ name, url }). Names are reduced to letters, digits
 	 * and underscores (what Mastodon accepts in a hashtag); empty results and case-insensitive
 	 * duplicates are dropped.
@@ -114,16 +160,16 @@ class {
 	}
 
 	/**
-	 * Delete of an object, sent as a Tombstone.
+	 * Delete of an object, sent as a Tombstone. extraCc: anyone else the object was addressed to.
 	 */
-	struct function delete( required string id, required string actorUrl, required string objectId, required string followersUrl ) {
+	struct function delete( required string id, required string actorUrl, required string objectId, required string followersUrl, array extraCc = [] ) {
 		return [
 			"@context" : variables.AS_CONTEXT,
 			"id"       : id,
 			"type"     : "Delete",
 			"actor"    : actorUrl,
 			"to"       : [ variables.PUBLIC ],
-			"cc"       : [ followersUrl ],
+			"cc"       : [ followersUrl ].append( extraCc, true ),
 			"object"   : [ "id" : objectId, "type" : "Tombstone" ]
 		];
 	}
@@ -139,6 +185,14 @@ class {
 			"formerType" : formerType,
 			"deleted"    : isoDate( deleted )
 		];
+	}
+
+	/**
+	 * Just the characters that matter in text and quoted attributes: encodeForHTML() also
+	 * escapes "/" and ":", which bloats every URL.
+	 */
+	private string function escapeHtml( required string value ) {
+		return value.replace( "&", "&amp;", "all" ).replace( "<", "&lt;", "all" ).replace( ">", "&gt;", "all" ).replace( '"', "&quot;", "all" );
 	}
 
 	/**

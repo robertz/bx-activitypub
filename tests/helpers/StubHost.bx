@@ -35,7 +35,12 @@ class implements="contracts.IHostApp" {
 		}
 	};
 
+	variables.COMMENTS = {};
+
 	function getObject( required string type, required string id ) {
+		if ( type == "comment" ) {
+			return variables.COMMENTS[ id ] ?: javacast( "null", "" );
+		}
 		return type == "post" ? ( variables.POSTS[ id ] ?: javacast( "null", "" ) ) : javacast( "null", "" );
 	}
 
@@ -50,6 +55,10 @@ class implements="contracts.IHostApp" {
 
 	void function putPost( required string id, required struct post ) {
 		variables.POSTS[ id ] = post;
+	}
+
+	void function putComment( required string id, required struct comment ) {
+		variables.COMMENTS[ id ] = comment;
 	}
 
 	void function removePost( required string id ) {

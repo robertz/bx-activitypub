@@ -85,7 +85,8 @@ CREATE TABLE IF NOT EXISTS `ApRemoteObject` (
 	`UpdatedAt`     DATETIME(3)   DEFAULT NULL,
 	PRIMARY KEY (`Id`),
 	UNIQUE KEY `UX_ApRemoteObject_ObjectUrl` (`ObjectUrl`),
-	KEY `IX_ApRemoteObject_ActorUrl` (`ActorUrl`)
+	KEY `IX_ApRemoteObject_ActorUrl` (`ActorUrl`),
+	KEY `IX_ApRemoteObject_HostId` (`HostId`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- Likes and boosts (Announce) of local objects, one per actor per type per object (0.4.0).

@@ -18,7 +18,7 @@
  */
 class {
 
-	variables.VERSION = "0.4.0";
+	variables.VERSION = "0.5.0";
 
 	function init( required host, required struct settings ) {
 		if ( !len( settings.datasource ?: "" ) ) {
@@ -118,7 +118,7 @@ class {
 		var author    = isNull( post ) ? javacast( "null", "" ) : variables.actors.findActor( "Person", post.author );
 
 		if ( isNull( author ) ) {
-			return isNull( last ) || last.type == "Delete" ? noAction() : deletePost( postId, last );
+			return isNull( last ) || last.type == "Delete" ? noAction() : deleteObject( "post", postId, last );
 		}
 		if ( isNull( last ) ) {
 			var created = publishPost( postId );
@@ -146,6 +146,53 @@ class {
 	 */
 	array function federatedPostIds() {
 		var prefix = variables.actors.objectUrl( "post", "" );
+		return variables.activities.federatedObjectUrls( prefix ).map( ( objectUrl ) => mid( objectUrl, len( prefix ) + 1, len( objectUrl ) ) );
+	}
+
+	/**
+	 * Replying back: brings the fediverse's copy of a local reply (kind "comment") in line with
+	 * the host, like syncPost(). A comment goes out as a Note from its author's account when
+	 * the host says it's public and it answers a remote reply the host accepted, or a local
+	 * reply that went out itself; the remote author being answered is mentioned (and so
+	 * notified) and gets it in their own inbox as well as the followers. Top-level comments and
+	 * replies in threads with no one from the fediverse never go out.
+	 * Returns { action ("create" | "update" | "delete" | "none"), activityId, queued }.
+	 */
+	struct function syncComment( required string commentId ) {
+		var objectUrl = variables.actors.objectUrl( "comment", commentId );
+		var last      = variables.activities.latestFor( objectUrl, [ "Create", "Update", "Delete" ] );
+		var note      = commentNote( commentId );
+
+		if ( isNull( note ) ) {
+			return isNull( last ) || last.type == "Delete" ? noAction() : deleteObject( "comment", commentId, last );
+		}
+		if ( !isNull( last ) && last.type == "Delete" ) {
+			return noAction();
+		}
+		var author = variables.actors.findActor( "Person", variables.actors.parseLocalUrl( note.attributedTo ).name );
+		var type   = "Create";
+		if ( !isNull( last ) ) {
+			if ( compare( note.content, jsonDeserialize( last.json ).object.content ?: "" ) == 0 ) {
+				return noAction();
+			}
+			note[ "updated" ] = variables.vocab.isoDate( now() );
+			type = "Update";
+		}
+		var uuid     = variables.activities.newId();
+		var activity = type == "Create"
+			? variables.vocab.create( variables.activities.urlFor( type, uuid ), note.attributedTo, note )
+			: variables.vocab.update( variables.activities.urlFor( type, uuid ), note.attributedTo, note );
+		variables.activities.store( uuid, activity );
+		var queued = sendToFollowers( uuid, "Person", author, mentionedActors( note ) );
+		writeLog( text = "#type == 'Create' ? 'published' : 'updated'# #objectUrl# as #type# #uuid# to #queued# inbox(es)", type = "information", log = "activitypub" );
+		return { action : lCase( type ), activityId : uuid, queued : queued };
+	}
+
+	/**
+	 * Comment ids that have gone out and not been deleted, for a host sweep (see federatedPostIds()).
+	 */
+	array function federatedCommentIds() {
+		var prefix = variables.actors.objectUrl( "comment", "" );
 		return variables.activities.federatedObjectUrls( prefix ).map( ( objectUrl ) => mid( objectUrl, len( prefix ) + 1, len( objectUrl ) ) );
 	}
 
@@ -182,6 +229,9 @@ class {
 	 * deleted from the fediverse serves a Tombstone (the adapter answers 410 Gone).
 	 */
 	function objectDocument( required string kind, required string id ) {
+		if ( kind == "comment" ) {
+			return commentDocument( id );
+		}
 		if ( kind != "post" ) {
 			return javacast( "null", "" );
 		}
@@ -204,6 +254,10 @@ class {
 	 * The object's human-facing URL, or "" (for redirecting browsers from the id path).
 	 */
 	string function objectHtmlUrl( required string kind, required string id ) {
+		if ( kind == "comment" ) {
+			var note = commentNote( id );
+			return isNull( note ) ? "" : note.url;
+		}
 		if ( kind != "post" ) {
 			return "";
 		}
@@ -271,33 +325,47 @@ class {
 	}
 
 	/**
-	 * Delete{Tombstone} for a post that was sent before. Signed by the actor that created
-	 * it, looked up without the isPublic gate: retracting is exactly what a now-hidden
-	 * actor or post needs.
+	 * Delete{Tombstone} for a post or comment that was sent before, to everyone the last
+	 * version went to. Signed by the actor that created it, looked up without the isPublic
+	 * gate: retracting is exactly what a now-hidden actor or object needs.
 	 */
-	private struct function deletePost( required string postId, required struct last ) {
-		var creator = jsonDeserialize( last.json ).actor;
+	private struct function deleteObject( required string kind, required string id, required struct last ) {
+		var sent    = jsonDeserialize( last.json );
+		var creator = sent.actor;
 		var localRef = variables.actors.parseLocalUrl( creator );
 		var actor    = isNull( localRef ) ? javacast( "null", "" ) : variables.host.findActor( localRef.type, localRef.name );
 		if ( isNull( actor ) ) {
-			writeLog( text = "cannot delete post #postId#: its actor #creator# no longer exists", type = "warning", log = "activitypub" );
+			writeLog( text = "cannot delete #kind# #id#: its actor #creator# no longer exists", type = "warning", log = "activitypub" );
 			return noAction();
 		}
 		var actorUrl  = variables.actors.actorUrl( localRef.type, actor.name );
-		var objectUrl = variables.actors.objectUrl( "post", postId );
+		var objectUrl = variables.actors.objectUrl( kind, id );
+		var mentioned = mentionedActors( sent.object );
 		var uuid      = variables.activities.newId();
-		variables.activities.store( uuid, variables.vocab.delete( variables.activities.urlFor( "Delete", uuid ), actorUrl, objectUrl, actorUrl & "/followers" ) );
-		var queued = sendToFollowers( uuid, localRef.type, actor );
+		variables.activities.store( uuid, variables.vocab.delete( variables.activities.urlFor( "Delete", uuid ), actorUrl, objectUrl, actorUrl & "/followers", mentioned ) );
+		var queued = sendToFollowers( uuid, localRef.type, actor, mentioned );
 		writeLog( text = "deleted #objectUrl# as Delete #uuid# to #queued# inbox(es)", type = "information", log = "activitypub" );
 		return { action : "delete", activityId : uuid, queued : queued };
 	}
 
 	/**
-	 * Queues activity uuid to every follower inbox of the actor (shared inboxes deduplicated),
-	 * signed with its key. Returns the number queued.
+	 * Queues activity uuid to every follower inbox of the actor, plus the inboxes of
+	 * alsoTo (remote actor URLs, e.g. someone mentioned), shared inboxes deduplicated, signed
+	 * with the actor's key. Returns the number queued.
 	 */
-	private numeric function sendToFollowers( required string uuid, required string type, required struct actor ) {
+	private numeric function sendToFollowers( required string uuid, required string type, required struct actor, array alsoTo = [] ) {
 		var inboxes = variables.followers.deliveryInboxes( type, actor.id );
+		for ( var remoteUrl in alsoTo ) {
+			try {
+				var remote = variables.remoteActors.lookup( remoteUrl );
+				var inbox  = len( remote.sharedInboxUrl ) ? remote.sharedInboxUrl : remote.inboxUrl;
+				if ( !inboxes.find( inbox ) ) {
+					inboxes.append( inbox );
+				}
+			} catch ( any e ) {
+				writeLog( text = "not sending #uuid# to #remoteUrl#: #e.message#", type = "warning", log = "activitypub" );
+			}
+		}
 		var keyId   = variables.actors.keyId( type, actor.name );
 		for ( var inbox in inboxes ) {
 			variables.delivery.enqueue( uuid, type, actor.id, keyId, inbox );
@@ -343,6 +411,89 @@ class {
 
 	private struct function noAction() {
 		return { action : "none", activityId : "", queued : 0 };
+	}
+
+	/**
+	 * The Note a local comment goes out as, or null when it must not go out: the host doesn't
+	 * have it or says it isn't public, its post or author isn't public, or it doesn't answer
+	 * something on the fediverse (a remote reply, or a local reply that went out and wasn't
+	 * deleted). Answering a local reply carries that reply's mentions forward.
+	 */
+	private function commentNote( required string commentId ) {
+		var comment = variables.host.getObject( "comment", commentId );
+		if ( isNull( comment ) || !variables.host.isPublic( "comment", commentId ) || !len( comment.parentId ?: "" ) ) {
+			return javacast( "null", "" );
+		}
+		var author = variables.actors.findActor( "Person", comment.author );
+		if ( isNull( author ) || isNull( publicPost( comment.postId ) ) ) {
+			return javacast( "null", "" );
+		}
+
+		var mentions = [];
+		var inReplyTo = "";
+		var remote    = variables.remoteObjects.findByHostId( comment.parentId );
+		if ( !isNull( remote ) ) {
+			inReplyTo = remote.objectUrl;
+			mentions  = [ remote.actorUrl ];
+		} else {
+			inReplyTo = variables.actors.objectUrl( "comment", comment.parentId );
+			var parent = variables.activities.latestFor( inReplyTo, [ "Create", "Update", "Delete" ] );
+			if ( isNull( parent ) || parent.type == "Delete" ) {
+				return javacast( "null", "" );
+			}
+			mentions = mentionedActors( jsonDeserialize( parent.json ).object );
+		}
+
+		var mentionDetails = [];
+		for ( var actorUrl in mentions ) {
+			try {
+				var remoteActor = variables.remoteActors.lookup( actorUrl );
+				mentionDetails.append( { actorUrl : actorUrl, handle : remoteActor.handle, profileUrl : remoteActor.profileUrl } );
+			} catch ( any e ) {
+				writeLog( text = "comment #commentId#: cannot mention #actorUrl#: #e.message#", type = "warning", log = "activitypub" );
+			}
+		}
+		var actorUrl = variables.actors.actorUrl( "Person", author.name );
+		return variables.vocab.note(
+			id           = variables.actors.objectUrl( "comment", commentId ),
+			actorUrl     = actorUrl,
+			followersUrl = actorUrl & "/followers",
+			inReplyTo    = inReplyTo,
+			comment      = comment,
+			mentions     = mentionDetails
+		);
+	}
+
+	private function commentDocument( required string commentId ) {
+		var objectUrl = variables.actors.objectUrl( "comment", commentId );
+		var last      = variables.activities.latestFor( objectUrl, [ "Create", "Update", "Delete" ] );
+		if ( isNull( last ) ) {
+			return javacast( "null", "" );
+		}
+		if ( last.type == "Delete" ) {
+			return variables.vocab.tombstone( objectUrl, "Note", last.createdAt );
+		}
+		var note = commentNote( commentId );
+		if ( isNull( note ) ) {
+			return javacast( "null", "" );
+		}
+		if ( last.type == "Update" ) {
+			note[ "updated" ] = jsonDeserialize( last.json ).object.updated;
+		}
+		return note;
+	}
+
+	/**
+	 * Actor URLs of an object's Mention tags.
+	 */
+	private array function mentionedActors( required struct object ) {
+		var out = [];
+		for ( var tag in isArray( object.tag ?: "" ) ? object.tag : [] ) {
+			if ( isStruct( tag ) && ( tag.type ?: "" ) == "Mention" && len( tag.href ?: "" ) ) {
+				out.append( tag.href );
+			}
+		}
+		return out;
 	}
 
 	/**
