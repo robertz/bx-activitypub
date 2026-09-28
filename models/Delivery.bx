@@ -2,16 +2,28 @@
  * DB-backed delivery queue (ApDelivery). Safe to run on several app instances at once:
  * each run claims due rows with a single UPDATE ... LIMIT tagged with its own token, and a
  * claim expires after CLAIM_LEASE_MINUTES so rows held by a crashed worker come back.
+ *
+ * A slow or dead inbox can't hold up the others: a run sends to up to MAX_PARALLEL_INBOXES
+ * inboxes at once, and within one inbox stops at the first failure, deferring the rest of
+ * that inbox's rows instead of waiting out a timeout for each. 410 Gone removes the
+ * followers behind the inbox and finishes all of its rows.
+ *
+ * Each inbox gets its activities in the order they were created (a post's Create before its
+ * Update before its Delete): rows are sent oldest first, and rows behind a failure are
+ * deferred to the failed row's retry time so they can't overtake it.
  */
 class {
 
 	// Minutes to wait after each failed attempt; once exhausted the delivery is abandoned.
-	variables.BACKOFF_MINUTES     = [ 1, 5, 30, 120, 720 ];
-	variables.CLAIM_LEASE_MINUTES = 5;
+	variables.BACKOFF_MINUTES      = [ 1, 5, 30, 120, 720 ];
+	variables.CLAIM_LEASE_MINUTES  = 5;
+	variables.DEFER_MINUTES        = 1;
+	variables.MAX_PARALLEL_INBOXES = 10;
 
-	function init( required httpClient, required actors, required string datasource ) {
+	function init( required httpClient, required actors, required followers, required string datasource ) {
 		variables.http       = arguments.httpClient;
 		variables.actors     = arguments.actors;
+		variables.followers  = arguments.followers;
 		variables.datasource = arguments.datasource;
 		return this;
 	}
@@ -56,19 +68,67 @@ class {
 				D.SigningKeyId, D.InboxUrl, D.Attempts, A.Json
 			 FROM ApDelivery D
 			 JOIN ApActivity A ON A.Id = D.ActivityId
-			 WHERE D.ClaimToken = UUID_TO_BIN(:token)",
+			 WHERE D.ClaimToken = UUID_TO_BIN(:token)
+			 ORDER BY A.CreatedAt, D.Id",
 			{ token : { value : token, sqltype : "varchar" } },
 			{ datasource : variables.datasource, returntype : "array" }
 		);
-		for ( var row in rows ) {
-			deliver( row );
-		}
+		arrayEach(
+			array      = groupByInbox( rows ),
+			callback   = ( group ) => deliverGroup( group ),
+			parallel   = true,
+			maxThreads = variables.MAX_PARALLEL_INBOXES
+		);
 		return rows.len();
 	}
 
 	// ---- private -------------------------------------------------------------
 
-	private void function deliver( required struct row ) {
+	/**
+	 * Rows grouped by exact inbox URL, oldest first within each group.
+	 */
+	private array function groupByInbox( required array rows ) {
+		var byInbox = createObject( "java", "java.util.LinkedHashMap" ).init();
+		for ( var row in rows ) {
+			var group = byInbox.get( row.InboxUrl );
+			if ( isNull( group ) ) {
+				group = [];
+			}
+			group.append( row );
+			byInbox.put( row.InboxUrl, group );
+		}
+		var groups = [];
+		for ( var group in byInbox.values() ) {
+			groups.append( group );
+		}
+		return groups;
+	}
+
+	/**
+	 * Sends one inbox's rows in order, stopping at the first one that doesn't succeed.
+	 */
+	private void function deliverGroup( required array group ) {
+		for ( var i = 1; i <= group.len(); i++ ) {
+			var result = deliver( group[ i ] );
+			if ( result.outcome == "delivered" ) {
+				continue;
+			}
+			var rest = i < group.len() ? group.slice( i + 1 ) : [];
+			if ( result.outcome == "gone" ) {
+				rest.each( ( row ) => markGone( row.Id, row.Attempts ) );
+			} else {
+				var waitMinutes = result.retryMinutes;
+				rest.each( ( row ) => deferRow( row.Id, waitMinutes ) );
+			}
+			return;
+		}
+	}
+
+	/**
+	 * Returns { outcome ("delivered", "gone" for 410, or "failed"), retryMinutes (when the
+	 * failed row will be tried again; DEFER_MINUTES once it has been given up on) }.
+	 */
+	private struct function deliver( required struct row ) {
 		var status = javacast( "null", "" );
 		var error  = "";
 		try {
@@ -77,7 +137,13 @@ class {
 			status       = response.status;
 			if ( status >= 200 && status <= 299 ) {
 				markDelivered( row.Id, status );
-				return;
+				return { outcome : "delivered", retryMinutes : 0 };
+			}
+			if ( status == 410 ) {
+				var removed = variables.followers.removeByInbox( row.InboxUrl );
+				writeLog( text = "#row.InboxUrl# is gone (410); removed #removed# follower(s)", type = "information", log = "activitypub" );
+				markGone( row.Id, row.Attempts );
+				return { outcome : "gone", retryMinutes : 0 };
 			}
 			error = left( response.body, 1000 );
 		} catch ( any e ) {
@@ -85,7 +151,39 @@ class {
 		}
 		var statusText = isNull( status ) ? "no response" : status;
 		writeLog( text = "delivery #row.Id# to #row.InboxUrl# failed (attempt #row.Attempts + 1#): #statusText# #error#", type = "warning", log = "activitypub" );
-		markFailed( row.Id, row.Attempts + 1, isNull( status ) ? 0 : status, error );
+		var attempts = row.Attempts + 1;
+		markFailed( row.Id, attempts, isNull( status ) ? 0 : status, error );
+		return {
+			outcome      : "failed",
+			retryMinutes : attempts <= variables.BACKOFF_MINUTES.len() ? variables.BACKOFF_MINUTES[ attempts ] : variables.DEFER_MINUTES
+		};
+	}
+
+	private void function markGone( required string id, required numeric attempts ) {
+		queryExecute(
+			"UPDATE ApDelivery SET Attempts = :attempts, LastStatus = 410, LastError = 'Gone: followers behind this inbox removed',
+				NextAttemptAt = NULL, ClaimToken = NULL
+			 WHERE Id = UUID_TO_BIN(:id)",
+			{
+				id       : { value : id, sqltype : "varchar" },
+				attempts : { value : attempts + 1, sqltype : "integer" }
+			},
+			{ datasource : variables.datasource }
+		);
+	}
+
+	/**
+	 * Releases a row that wasn't attempted because an earlier row for the same inbox failed
+	 * in this run. Its attempt count is untouched: it never reached the inbox.
+	 */
+	private void function deferRow( required string id, required numeric minutes ) {
+		queryExecute(
+			"UPDATE ApDelivery SET ClaimToken = NULL, NextAttemptAt = NOW(3) + INTERVAL #int( minutes )# MINUTE,
+				LastError = 'deferred: an earlier delivery to this inbox failed in the same run'
+			 WHERE Id = UUID_TO_BIN(:id)",
+			{ id : { value : id, sqltype : "varchar" } },
+			{ datasource : variables.datasource }
+		);
 	}
 
 	private void function markDelivered( required string id, required numeric status ) {

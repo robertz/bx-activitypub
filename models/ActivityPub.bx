@@ -12,6 +12,8 @@
  *   maxFutureSeconds  furthest-ahead incoming signed Date accepted (default 300)
  *   httpTimeoutSeconds outbound connect + request timeout (default 10)
  *   userAgent         outbound User-Agent (default "bx-activitypub/{version} (+{baseUrl})")
+ *   softwareName      NodeInfo software.name, ^[a-z0-9-]+$ (default "bx-activitypub")
+ *   softwareVersion   NodeInfo software.version (default this module's version)
  */
 class {
 
@@ -35,8 +37,15 @@ class {
 		variables.remoteActors = new RemoteActors( variables.http, variables.actors, dsn );
 		variables.followers    = new Followers( dsn );
 		variables.activities   = new Activities( variables.actors, dsn );
-		variables.delivery     = new Delivery( variables.http, variables.actors, dsn );
+		variables.delivery     = new Delivery( variables.http, variables.actors, variables.followers, dsn );
 		variables.webFinger    = new WebFinger( variables.actors );
+		variables.nodeInfo     = new NodeInfo(
+			actors          = variables.actors,
+			activities      = variables.activities,
+			datasource      = dsn,
+			softwareName    = settings.softwareName ?: "bx-activitypub",
+			softwareVersion = settings.softwareVersion ?: variables.VERSION
+		);
 		variables.inbox        = new Inbox(
 			signatures   = variables.signatures,
 			remoteActors = variables.remoteActors,
@@ -188,6 +197,14 @@ class {
 	string function actorHtmlUrl( required string type, required string name ) {
 		var actor = variables.actors.findActor( type, name );
 		return isNull( actor ) ? "" : ( actor.url ?: "" );
+	}
+
+	struct function nodeInfoLinks() {
+		return variables.nodeInfo.wellKnown();
+	}
+
+	struct function nodeInfoDocument() {
+		return variables.nodeInfo.document();
 	}
 
 	function webfinger( required string resource ) {

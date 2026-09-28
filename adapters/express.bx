@@ -21,6 +21,8 @@ class {
 		variables.maxInboxBytes = options.maxInboxBytes ?: 262144;
 
 		app.get( "/.well-known/webfinger", ( req, res ) => webfingerRoute( req, res ) );
+		app.get( "/.well-known/nodeinfo", ( req, res ) => sendNodeInfo( res, variables.ap.nodeInfoLinks(), "application/json" ) );
+		app.get( "/nodeinfo/2.1", ( req, res ) => sendNodeInfo( res, variables.ap.nodeInfoDocument(), 'application/json; profile="http://nodeinfo.diaspora.software/ns/schema/2.1##"' ) );
 		app.get( "/actor", ( req, res ) => sendActivityJson( res, variables.ap.instanceActorDocument() ) );
 		app.post( "/inbox", ( req, res ) => inboxRoute( req, res ) );
 
@@ -124,6 +126,11 @@ class {
 
 	private function sendActivityJson( res, required struct doc ) {
 		return res.type( variables.AP_CONTENT_TYPE ).send( jsonSerialize( doc ) );
+	}
+
+	private function sendNodeInfo( res, required struct doc, required string contentType ) {
+		res.set( "Access-Control-Allow-Origin", "*" );
+		return res.type( contentType ).send( jsonSerialize( doc ) );
 	}
 
 	private boolean function wantsActivityJson( req ) {

@@ -15,7 +15,7 @@ class extends="testbox.system.BaseSpec" {
 			beforeEach( () => {
 				db.rows( "DELETE FROM ApDelivery" );
 				variables.http     = createEmptyMock( "models.HttpClient" ).$( "signedPost", { status : 202, body : "" } );
-				variables.delivery = new models.Delivery( http, actors, db.dsn() );
+				variables.delivery = new models.Delivery( http, actors, new models.Followers( db.dsn() ), db.dsn() );
 			} );
 
 			it( "sends a queued activity signed with the stored key and marks it delivered", () => {
@@ -83,6 +83,138 @@ class extends="testbox.system.BaseSpec" {
 
 		} );
 
+		describe( "Delivery under failure", () => {
+
+			beforeEach( () => {
+				db.rows( "SET FOREIGN_KEY_CHECKS = 0; DELETE FROM ApDelivery; DELETE FROM ApFollower; DELETE FROM ApRemoteActor; SET FOREIGN_KEY_CHECKS = 1;" );
+				variables.fake     = new tests.helpers.FakeHttpClient();
+				variables.delivery = new models.Delivery( fake, actors, new models.Followers( db.dsn() ), db.dsn() );
+			} );
+
+			it( "removes the follower and stops retrying when a personal inbox answers 410", () => {
+				addFollower( "https://gone.example/u/1", "https://gone.example/u/1/inbox", "" );
+				addFollower( "https://ok.example/u/1", "https://ok.example/u/1/inbox", "" );
+				fake.respond( "https://gone.example/u/1/inbox", 410 );
+				enqueueTo( "https://gone.example/u/1/inbox" );
+				enqueueTo( "https://gone.example/u/1/inbox" );
+
+				delivery.runOnce();
+
+				expect( followerActorUrls() ).toBe( [ "https://ok.example/u/1" ] );
+				expect( fake.callsTo( "https://gone.example/u/1/inbox" ) ).toBe( 1 );
+				var rows = rowsFor( "https://gone.example/u/1/inbox" );
+				expect( rows.map( ( r ) => r.LastStatus ) ).toBe( [ 410, 410 ] );
+				expect( rows.map( ( r ) => r.Finished ) ).toBe( [ 1, 1 ] );
+				expect( rows.map( ( r ) => r.Delivered ) ).toBe( [ 0, 0 ] );
+			} );
+
+			it( "removes every follower on a server whose shared inbox answers 410", () => {
+				addFollower( "https://gone.example/u/1", "https://gone.example/u/1/inbox", "https://gone.example/inbox" );
+				addFollower( "https://gone.example/u/2", "https://gone.example/u/2/inbox", "https://gone.example/inbox" );
+				addFollower( "https://ok.example/u/1", "https://ok.example/u/1/inbox", "https://ok.example/inbox" );
+				fake.respond( "https://gone.example/inbox", 410 );
+				enqueueTo( "https://gone.example/inbox" );
+
+				delivery.runOnce();
+
+				expect( followerActorUrls() ).toBe( [ "https://ok.example/u/1" ] );
+			} );
+
+			it( "keeps followers and retries on other errors", () => {
+				addFollower( "https://busy.example/u/1", "https://busy.example/u/1/inbox", "" );
+				fake.respond( "https://busy.example/u/1/inbox", 404 );
+				enqueueTo( "https://busy.example/u/1/inbox" );
+
+				delivery.runOnce();
+
+				expect( followerActorUrls() ).toBe( [ "https://busy.example/u/1" ] );
+				var row = rowsFor( "https://busy.example/u/1/inbox" )[ 1 ];
+				expect( row.LastStatus ).toBe( 404 );
+				expect( row.Finished ).toBe( 0 );
+				expect( row.Attempts ).toBe( 1 );
+			} );
+
+			it( "doesn't let a dead inbox hold up the others", () => {
+				var dead = "https://dead.example/inbox";
+				fake.respond( dead, 0, 1500, "BxActivityPub.Timeout" );
+				enqueueTo( dead );
+				enqueueTo( dead );
+				enqueueTo( dead );
+				for ( var i = 1; i <= 4; i++ ) {
+					enqueueTo( "https://ok#i#.example/inbox" );
+				}
+
+				var started = getTickCount();
+				delivery.runOnce();
+				var elapsed = getTickCount() - started;
+
+				// One wait for the dead inbox, not one per row, and in parallel with the rest.
+				expect( elapsed ).toBeLT( 3000 );
+				expect( fake.callsTo( dead ) ).toBe( 1 );
+				for ( var i = 1; i <= 4; i++ ) {
+					expect( rowsFor( "https://ok#i#.example/inbox" )[ 1 ].Delivered ).toBe( 1 );
+				}
+
+				var deadRows = rowsFor( dead );
+				expect( deadRows.map( ( r ) => r.Attempts ) ).toBe( [ 1, 0, 0 ] );
+				expect( deadRows[ 1 ].RetryInSeconds ).toBeBetween( 50, 61 );
+				expect( deadRows[ 2 ].LastError ).toInclude( "deferred" );
+				expect( deadRows[ 3 ].RetryInSeconds ).toBeBetween( 50, 61 );
+				expect( deadRows.map( ( r ) => r.Finished ) ).toBe( [ 0, 0, 0 ] );
+			} );
+
+			it( "keeps an inbox's activities in order when an earlier one backs off", () => {
+				var inbox = "https://flaky.example/inbox";
+				enqueueTo( inbox );
+				sleep( 5 );
+				enqueueTo( inbox );
+				db.rows( "UPDATE ApDelivery D JOIN ApActivity A ON A.Id = D.ActivityId SET D.Attempts = 1 WHERE A.CreatedAt = (SELECT MinCreated FROM (SELECT MIN(A2.CreatedAt) AS MinCreated FROM ApDelivery D2 JOIN ApActivity A2 ON A2.Id = D2.ActivityId) M)" );
+				fake.respond( inbox, 503 );
+
+				delivery.runOnce();
+
+				// The first row failed its second attempt (5 minute backoff); the one behind it
+				// must not become due before it does.
+				var rows = rowsFor( inbox );
+				expect( rows[ 1 ].Attempts ).toBe( 2 );
+				expect( rows[ 1 ].RetryInSeconds ).toBeBetween( 290, 301 );
+				expect( rows[ 2 ].Attempts ).toBe( 0 );
+				expect( rows[ 2 ].RetryInSeconds ).toBeGTE( rows[ 1 ].RetryInSeconds );
+			} );
+
+			it( "sends to many slow inboxes in parallel", () => {
+				for ( var i = 1; i <= 10; i++ ) {
+					fake.respond( "https://slow#i#.example/inbox", 202, 1000 );
+					enqueueTo( "https://slow#i#.example/inbox" );
+				}
+				var started = getTickCount();
+				expect( delivery.runOnce() ).toBe( 10 );
+				expect( getTickCount() - started ).toBeLT( 4000 );
+				expect( db.rows( "SELECT COUNT(*) AS N FROM ApDelivery WHERE DeliveredAt IS NOT NULL" )[ 1 ].N ).toBe( 10 );
+			} );
+
+			it( "retries a failed shared-inbox delivery as one delivery, not one per follower", () => {
+				var shared = "https://many.example/inbox";
+				for ( var i = 1; i <= 3; i++ ) {
+					addFollower( "https://many.example/u/#i#", "https://many.example/u/#i#/inbox", shared );
+				}
+				var ap = new models.ActivityPub( host = new tests.helpers.StubHost(), settings = { datasource : db.dsn() } );
+				db.rows( "UPDATE ApFollower SET ActorType = 'Person', LocalId = UUID_TO_BIN('0192a6f0-0000-7000-8000-000000000002')" );
+				db.rows( "DELETE FROM ApActivity WHERE Type = 'Create'" );
+				expect( ap.publishPost( "0192a6f0-0000-7000-8000-000000000101" ).queued ).toBe( 1 );
+
+				fake.respond( shared, 503 );
+				delivery.runOnce();
+				fake.respond( shared, 202 );
+				db.rows( "UPDATE ApDelivery SET NextAttemptAt = NOW(3)" );
+				delivery.runOnce();
+
+				expect( fake.callsTo( shared ) ).toBe( 2 );
+				expect( db.rows( "SELECT COUNT(*) AS N FROM ApDelivery WHERE DeliveredAt IS NOT NULL" )[ 1 ].N ).toBe( 1 );
+			} );
+
+		} );
+
 		describe( "Actors.getKeys", () => {
 
 			beforeEach( () => {
@@ -127,6 +259,40 @@ class extends="testbox.system.BaseSpec" {
 		} ) );
 		delivery.enqueue( id, "Group", groupId(), actors.keyId( "Group", "general" ), INBOX );
 		return id;
+	}
+
+	private void function enqueueTo( required string inboxUrl ) {
+		var id = activities.newId();
+		activities.store( id, new models.Vocab().accept( activities.urlFor( "Accept", id ), "https://site.example/c/general", {
+			id : "https://remote.example/f/#id#", type : "Follow", actor : "https://remote.example/u/a", object : "https://site.example/c/general"
+		} ) );
+		delivery.enqueue( id, "Group", groupId(), actors.keyId( "Group", "general" ), inboxUrl );
+	}
+
+	private void function addFollower( required string actorUrl, required string inbox, required string shared ) {
+		var id = createObject( "java", "java.util.UUID" ).randomUUID().toString();
+		db.rows(
+			"INSERT INTO ApRemoteActor (Id, ActorUrl, InboxUrl, SharedInboxUrl, PublicKeyId, PublicKeyPem) VALUES (UUID_TO_BIN(:id), :actorUrl, :inbox, NULLIF(:shared, ''), 'k', 'p')",
+			{ id : id, actorUrl : actorUrl, inbox : inbox, shared : shared }
+		);
+		db.rows(
+			"INSERT INTO ApFollower (ActorType, LocalId, RemoteActorId, InboxUrl, SharedInboxUrl, FollowActivityId) VALUES ('Group', UUID_TO_BIN(:localId), UUID_TO_BIN(:id), :inbox, NULLIF(:shared, ''), :follow)",
+			{ localId : groupId(), id : id, inbox : inbox, shared : shared, follow : actorUrl & "/follow" }
+		);
+	}
+
+	private array function followerActorUrls() {
+		return db.rows( "SELECT R.ActorUrl FROM ApFollower F JOIN ApRemoteActor R ON R.Id = F.RemoteActorId ORDER BY R.ActorUrl" ).map( ( r ) => r.ActorUrl );
+	}
+
+	private array function rowsFor( required string inboxUrl ) {
+		return db.rows(
+			"SELECT D.Attempts, D.LastStatus, D.LastError, D.DeliveredAt IS NOT NULL AS Delivered, D.NextAttemptAt IS NULL AS Finished,
+				TIMESTAMPDIFF(SECOND, NOW(3), D.NextAttemptAt) AS RetryInSeconds
+			 FROM ApDelivery D JOIN ApActivity A ON A.Id = D.ActivityId
+			 WHERE D.InboxUrl = :inbox ORDER BY A.CreatedAt, D.Id",
+			{ inbox : inboxUrl }
+		);
 	}
 
 	private struct function deliveryRow() {

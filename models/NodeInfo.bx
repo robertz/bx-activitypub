@@ -1,0 +1,71 @@
+/**
+ * NodeInfo 2.1 (https://nodeinfo.diaspora.software/schema.html). Counts come from the
+ * module's own tables, so the host doesn't have to provide them. users.total is local
+ * Persons the fediverse has seen (their actor was fetched or they signed something, which
+ * is when their keypair gets generated). Active users sent a Create in the period, and
+ * local posts are posts currently on the fediverse.
+ */
+class {
+
+	variables.SCHEMA = "http://nodeinfo.diaspora.software/ns/schema/2.1";
+
+	function init( required actors, required activities, required string datasource, required string softwareName, required string softwareVersion ) {
+		if ( !reFind( "^[a-z0-9-]+$", softwareName ) ) {
+			throw( type = "BxActivityPub.ConfigurationException", message = "NodeInfo software name must match ^[a-z0-9-]+$, got [#softwareName#]" );
+		}
+		variables.actors          = arguments.actors;
+		variables.activities      = arguments.activities;
+		variables.datasource      = arguments.datasource;
+		variables.softwareName    = arguments.softwareName;
+		variables.softwareVersion = arguments.softwareVersion;
+		return this;
+	}
+
+	struct function wellKnown() {
+		return [ "links" : [ [ "rel" : variables.SCHEMA, "href" : variables.actors.baseUrl() & "/nodeinfo/2.1" ] ] ];
+	}
+
+	struct function document() {
+		return [
+			"version"           : "2.1",
+			"software"          : [
+				"name"       : variables.softwareName,
+				"version"    : variables.softwareVersion,
+				"repository" : "https://github.com/robertz/bx-activitypub"
+			],
+			"protocols"         : [ "activitypub" ],
+			"services"          : [ "inbound" : [], "outbound" : [] ],
+			"openRegistrations" : false,
+			"usage"             : [
+				"users"      : [
+					"total"          : totalUsers(),
+					"activeMonth"    : activeUsers( 30 ),
+					"activeHalfyear" : activeUsers( 180 )
+				],
+				"localPosts" : variables.activities.federatedObjectUrls( variables.actors.objectUrl( "post", "" ) ).len()
+			],
+			"metadata"          : {}
+		];
+	}
+
+	private numeric function totalUsers() {
+		return queryExecute(
+			"SELECT COUNT(*) AS Total FROM ApActorKey WHERE ActorType = 'Person'",
+			{},
+			{ datasource : variables.datasource, returntype : "array" }
+		)[ 1 ].Total;
+	}
+
+	private numeric function activeUsers( required numeric days ) {
+		return queryExecute(
+			"SELECT COUNT(DISTINCT ActorUrl) AS Total FROM ApActivity
+			 WHERE Type = 'Create' AND ActorUrl LIKE :personPrefix AND CreatedAt > NOW(3) - INTERVAL :days DAY",
+			{
+				personPrefix : { value : variables.actors.baseUrl() & "/u/%", sqltype : "varchar" },
+				days         : { value : days, sqltype : "integer" }
+			},
+			{ datasource : variables.datasource, returntype : "array" }
+		)[ 1 ].Total;
+	}
+
+}

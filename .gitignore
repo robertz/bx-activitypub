@@ -2,3 +2,4 @@ testbox/
 boxlang_modules/
 examples/*/boxlang_modules/
 examples/*/.env
+tests/logs/

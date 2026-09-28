@@ -1,0 +1,47 @@
+/**
+ * Stands in for models.HttpClient in delivery specs. Thread-safe, because Delivery sends
+ * to several inboxes in parallel. Inboxes answer 202 unless told otherwise with respond().
+ */
+class {
+
+	function init() {
+		variables.behaviour = createObject( "java", "java.util.concurrent.ConcurrentHashMap" ).init();
+		variables.calls     = createObject( "java", "java.util.concurrent.ConcurrentLinkedQueue" ).init();
+		return this;
+	}
+
+	/**
+	 * Makes inboxUrl answer with status after delayMs, or throw throwType (simulating a
+	 * timeout or refused connection) after delayMs.
+	 */
+	function respond( required string inboxUrl, numeric status = 202, numeric delayMs = 0, string throwType = "" ) {
+		variables.behaviour.put( inboxUrl, { status : status, delayMs : delayMs, throwType : throwType } );
+		return this;
+	}
+
+	struct function signedPost( required string targetUrl, required string body, required string keyId, required string privateKeyPem ) {
+		variables.calls.add( targetUrl );
+		var planned = variables.behaviour.get( targetUrl );
+		if ( isNull( planned ) ) {
+			return { status : 202, body : "", contentType : "" };
+		}
+		if ( planned.delayMs > 0 ) {
+			sleep( planned.delayMs );
+		}
+		if ( len( planned.throwType ) ) {
+			throw( type = planned.throwType, message = "simulated failure for #targetUrl#" );
+		}
+		return { status : planned.status, body : "status #planned.status#", contentType : "text/plain" };
+	}
+
+	numeric function callsTo( required string inboxUrl ) {
+		var count = 0;
+		for ( var called in variables.calls.toArray() ) {
+			if ( called == inboxUrl ) {
+				count++;
+			}
+		}
+		return count;
+	}
+
+}

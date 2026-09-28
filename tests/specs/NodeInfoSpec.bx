@@ -1,0 +1,58 @@
+class extends="testbox.system.BaseSpec" {
+
+	variables.POST_ID = "0192a6f0-0000-7000-8000-000000000101";
+
+	function beforeAll() {
+		variables.db = new tests.helpers.TestDb();
+		db.reset();
+	}
+
+	function run() {
+		describe( "NodeInfo", () => {
+
+			beforeEach( () => {
+				db.rows( "SET FOREIGN_KEY_CHECKS = 0; DELETE FROM ApDelivery; DELETE FROM ApActivity; DELETE FROM ApFollower; DELETE FROM ApActorKey; SET FOREIGN_KEY_CHECKS = 1;" );
+				variables.host = new tests.helpers.StubHost();
+				variables.ap   = new models.ActivityPub( host = host, settings = { datasource : db.dsn() } );
+			} );
+
+			it( "links the 2.1 document from .well-known", () => {
+				expect( ap.nodeInfoLinks() ).toBe( { links : [ { rel : "http://nodeinfo.diaspora.software/ns/schema/2.1", href : "https://site.example/nodeinfo/2.1" } ] } );
+			} );
+
+			it( "describes the software and protocol", () => {
+				var doc = ap.nodeInfoDocument();
+				expect( doc.version ).toBe( "2.1" );
+				expect( doc.software.name ).toBe( "bx-activitypub" );
+				expect( doc.protocols ).toBe( [ "activitypub" ] );
+				expect( doc.openRegistrations ).toBeFalse();
+				expect( jsonSerialize( doc ) ).toInclude( '"services":{"inbound":[],"outbound":[]}' );
+				expect( jsonSerialize( doc ) ).toInclude( '"metadata":{}' );
+			} );
+
+			it( "counts users, active users and live posts", () => {
+				expect( ap.nodeInfoDocument().usage ).toBe( { users : { total : 0, activeMonth : 0, activeHalfyear : 0 }, localPosts : 0 } );
+
+				// A user counts once the fediverse has seen them: here, their actor was fetched.
+				ap.actorDocument( "Person", "robert" );
+				ap.syncPost( POST_ID );
+				var usage = ap.nodeInfoDocument().usage;
+				expect( usage.users ).toBe( { total : 1, activeMonth : 1, activeHalfyear : 1 } );
+				expect( usage.localPosts ).toBe( 1 );
+
+				host.setPublic( POST_ID, false );
+				ap.syncPost( POST_ID );
+				expect( ap.nodeInfoDocument().usage.localPosts ).toBe( 0 );
+			} );
+
+			it( "takes the software name from settings and validates it", () => {
+				var custom = new models.ActivityPub( host = host, settings = { datasource : db.dsn(), softwareName : "kisdigital", softwareVersion : "2.0.0" } );
+				expect( custom.nodeInfoDocument().software.name ).toBe( "kisdigital" );
+				expect( custom.nodeInfoDocument().software.version ).toBe( "2.0.0" );
+				expect( () => new models.ActivityPub( host = host, settings = { datasource : db.dsn(), softwareName : "KIS Digital" } ) ).toThrow( "BxActivityPub.ConfigurationException" );
+			} );
+
+		} );
+	}
+
+}

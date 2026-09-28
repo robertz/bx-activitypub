@@ -8,5 +8,8 @@
 			"username": "${env.DB_USER:root}",
 			"custom": "allowPublicKeyRetrieval=true&useSSL=false&allowMultiQueries=true"
 		}
+	},
+	"logging": {
+		"logsDirectory": "${user-dir}/tests/logs"
 	}
 }

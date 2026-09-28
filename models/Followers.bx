@@ -39,6 +39,20 @@ class {
 		return result.recordCount ?: 0;
 	}
 
+	/**
+	 * Removes every follower reached through this inbox: the follower whose personal inbox
+	 * it is, or all followers on a server whose shared inbox it is. For 410 Gone.
+	 */
+	numeric function removeByInbox( required string inboxUrl ) {
+		var result = {};
+		queryExecute(
+			"DELETE FROM ApFollower WHERE InboxUrl = :inboxUrl OR SharedInboxUrl = :inboxUrl",
+			{ inboxUrl : { value : inboxUrl, sqltype : "varchar" } },
+			{ datasource : variables.datasource, result : "result" }
+		);
+		return result.recordCount ?: 0;
+	}
+
 	numeric function removeByFollowId( required string remoteId, required string followActivityId ) {
 		var result = {};
 		queryExecute(
