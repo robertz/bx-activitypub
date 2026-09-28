@@ -48,7 +48,7 @@ Types are `"Person"` and `"Group"` for accounts, and `"post"` for posts.
 | Method | Returns |
 |---|---|
 | `baseUrl()` | Your canonical origin, e.g. `"https://example.com"`. Account and post ids are built from it. |
-| `findActor( type, name )` | `{ id, name, displayName, summary, avatar, url }` or `null`. `id` is your UUID for the account (keypairs and followers are keyed by it); `name` is the handle, as in `@name@host`; `summary` is HTML; `avatar` and `url` (the profile page) are optional absolute URLs. |
+| `findActor( type, name )` | `{ id, name, displayName, summary, avatar, header, url }` or `null`. `id` is your UUID for the account (keypairs and followers are keyed by it); `name` is the handle, as in `@name@host`; `summary` is HTML; `avatar`, `header` (the profile banner; Mastodon crops it to about 3:1) and `url` (the profile page) are optional absolute URLs. |
 | `getObject( "post", id )` | `{ author, title, summary, content, url, published }` or `null`. `author` is the Person's `name`; `content` is HTML; `url` is the post's page; `published` is a date. |
 | `isPublic( type, id )` | Whether this account or post may be federated at all. Checked before every lookup, serving and delivery; `false` means the module behaves as if it doesn't exist. Return `false` for drafts, private content and inactive accounts. |
 
@@ -192,7 +192,7 @@ Call `syncPost( id )` for any post that might have changed, as often as you like
 | sent before, and now not public or gone (`getObject` returns `null`) | `Delete`; its id then answers `410 Gone` |
 | anything else | nothing |
 
-`syncActor( type, name )` does the same for the account's profile (`Update{Person}`). `federatedPostIds()` lists every post currently on the fediverse, so a sweep can revisit posts that have since been unpublished or deleted. `publishPost( id )` sends a post's first `Create` explicitly.
+`syncActor( type, name )` does the same for the account's profile (`Update{Person}`): name, bio, avatar, header or profile URL. `federatedPostIds()` lists every post currently on the fediverse, so a sweep can revisit posts that have since been unpublished or deleted. `publishPost( id )` sends a post's first `Create` explicitly.
 
 A typical app runs a scheduled sweep: `syncPost` for its recent posts plus `federatedPostIds()`, then `syncActor`. Choose a cutoff for "recent". Mastodon files a post under its `published` date, so an old post federated today lands deep in followers' timelines, and backfilling your whole archive sends every new follower a flood.
 

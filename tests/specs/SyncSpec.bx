@@ -136,6 +136,12 @@ class extends="testbox.system.BaseSpec" {
 				host.setActorField( "Person", "robert", "avatar", "https://site.example/logo.png" );
 				expect( ap.syncActor( "Person", "robert" ).action ).toBe( "update" );
 				expect( ap.syncActor( "Person", "robert" ).action ).toBe( "none" );
+
+				host.setActorField( "Person", "robert", "header", "https://site.example/header.jpg" );
+				var withHeader = ap.syncActor( "Person", "robert" );
+				expect( withHeader.action ).toBe( "update" );
+				expect( jsonDeserialize( ap.activityJson( "update", withHeader.activityId ) ).object.image.url ).toBe( "https://site.example/header.jpg" );
+				expect( ap.syncActor( "Person", "robert" ).action ).toBe( "none" );
 			} );
 
 			it( "sends nothing for a non-public actor", () => {

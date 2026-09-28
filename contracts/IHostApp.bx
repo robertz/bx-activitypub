@@ -12,9 +12,10 @@ interface {
 	string function baseUrl();
 
 	/**
-	 * { id, name, displayName, summary, avatar, url } or null. id is the host's UUID for the
-	 * actor (the module keys keypairs and followers by it); name is the WebFinger handle;
-	 * url (optional) is the actor's HTML profile page.
+	 * { id, name, displayName, summary, avatar, header, url } or null. id is the host's UUID
+	 * for the actor (the module keys keypairs and followers by it); name is the WebFinger
+	 * handle; avatar and header (optional) are absolute image URLs, header being the profile
+	 * banner (Mastodon crops it to about 3:1); url (optional) is the actor's HTML profile page.
 	 */
 	function findActor( required string type, required string name );
 

@@ -13,7 +13,8 @@ class extends="testbox.system.BaseSpec" {
 
 			beforeEach( () => {
 				db.rows( "SET FOREIGN_KEY_CHECKS = 0; DELETE FROM ApDelivery; DELETE FROM ApActivity; DELETE FROM ApFollower; DELETE FROM ApRemoteActor; SET FOREIGN_KEY_CHECKS = 1;" );
-				variables.ap = new models.ActivityPub( host = new tests.helpers.StubHost(), settings = { datasource : db.dsn() } );
+				variables.host = new tests.helpers.StubHost();
+				variables.ap   = new models.ActivityPub( host = host, settings = { datasource : db.dsn() } );
 			} );
 
 			it( "stores a Create{Article} and queues it once per shared inbox", () => {
@@ -76,6 +77,12 @@ class extends="testbox.system.BaseSpec" {
 				expect( isNull( ap.actorDocument( "Person", "hidden" ) ) ).toBeTrue();
 				expect( isNull( ap.followersCollection( "Person", "hidden" ) ) ).toBeTrue();
 				expect( isNull( ap.webfinger( "acct:robert@site.example" ) ) ).toBeFalse();
+			} );
+
+			it( "publishes the host's header image as the actor's image", () => {
+				expect( isNull( ap.actorDocument( "Person", "robert" ).image ?: javacast( "null", "" ) ) ).toBeTrue();
+				host.setActorField( "Person", "robert", "header", "https://site.example/header.jpg" );
+				expect( ap.actorDocument( "Person", "robert" ).image ).toBe( { type : "Image", url : "https://site.example/header.jpg" } );
 			} );
 
 			it( "points the actor document and browsers at the host's profile page", () => {

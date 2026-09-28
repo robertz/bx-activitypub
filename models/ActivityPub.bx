@@ -18,7 +18,7 @@
  */
 class {
 
-	variables.VERSION = "0.2.0";
+	variables.VERSION = "0.2.1";
 
 	function init( required host, required struct settings ) {
 		if ( !len( settings.datasource ?: "" ) ) {
@@ -148,7 +148,7 @@ class {
 	}
 
 	/**
-	 * Sends Update{actor} when the actor's public profile (name, bio, avatar, url) differs
+	 * Sends Update{actor} when the actor's public profile (name, bio, avatar, header, url) differs
 	 * from the last one sent; the first call always sends. Returns { action, activityId, queued }.
 	 */
 	struct function syncActor( required string type, required string name ) {
@@ -312,9 +312,14 @@ class {
 				return true;
 			}
 		}
-		var currentIcon = isStruct( current.icon ?: "" ) ? current.icon.url : "";
-		var sentIcon    = isStruct( sent.icon ?: "" ) ? sent.icon.url : "";
-		return compare( currentIcon, sentIcon ) != 0;
+		for ( var imageField in [ "icon", "image" ] ) {
+			var currentUrl = isStruct( current[ imageField ] ?: "" ) ? current[ imageField ].url : "";
+			var sentUrl    = isStruct( sent[ imageField ] ?: "" ) ? sent[ imageField ].url : "";
+			if ( compare( currentUrl, sentUrl ) != 0 ) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	private struct function noAction() {
