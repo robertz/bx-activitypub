@@ -21,7 +21,9 @@ interface {
 
 	/**
 	 * For "post": { author (Person name), title, summary, content (HTML), url (HTML page),
-	 * published (date) } or null.
+	 * published (date), tags (optional) } or null. tags is an array of { name, url }: sent as
+	 * hashtags (name reduced to letters, digits and underscores), url being the host's page
+	 * for the tag.
 	 */
 	function getObject( required string type, required string id );
 

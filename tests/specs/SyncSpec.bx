@@ -46,6 +46,17 @@ class extends="testbox.system.BaseSpec" {
 				expect( ap.syncPost( POST_ID ).action ).toBe( "none" );
 			} );
 
+			it( "sends an Update when the tags change, and not when they don't", () => {
+				editPost( "tags", [ { name : "BoxLang", url : "https://site.example/tag/BoxLang" } ] );
+				ap.syncPost( POST_ID );
+				expect( ap.syncPost( POST_ID ).action ).toBe( "none" );
+				editPost( "tags", [ { name : "BoxLang", url : "https://site.example/tag/BoxLang" }, { name : "Fediverse", url : "https://site.example/tag/Fediverse" } ] );
+				var result = ap.syncPost( POST_ID );
+				expect( result.action ).toBe( "update" );
+				var update = jsonDeserialize( ap.activityJson( "update", result.activityId ) );
+				expect( update.object.tag.map( ( t ) => t.name ) ).toBe( [ "##BoxLang", "##Fediverse" ] );
+			} );
+
 			it( "treats a case-only edit as an edit", () => {
 				ap.syncPost( POST_ID );
 				editPost( "title", "HELLO" );

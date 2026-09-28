@@ -4,7 +4,7 @@ Outbound [ActivityPub](https://www.w3.org/TR/activitypub/) federation for BoxLan
 
 Your app keeps its data; the module handles the protocol: WebFinger, actor documents, HTTP Signatures, the inbox, a delivery queue that survives restarts, and NodeInfo.
 
-**Status: 0.2.0.** Author mode (an account publishing `Article`s) is complete and verified against Mastodon. Your app can also accept **public replies** to its posts from the fediverse, and their edits and deletions, by implementing an optional second contract. Likes, boosts and everything else inbound are acknowledged and ignored.
+**Status: 0.3.0.** Author mode (an account publishing `Article`s) is complete and verified against Mastodon. Your app can also accept **public replies** to its posts from the fediverse, and their edits and deletions, by implementing an optional second contract. Likes, boosts and everything else inbound are acknowledged and ignored.
 
 ## Requirements
 
@@ -49,7 +49,7 @@ Types are `"Person"` and `"Group"` for accounts, and `"post"` for posts.
 |---|---|
 | `baseUrl()` | Your canonical origin, e.g. `"https://example.com"`. Account and post ids are built from it. |
 | `findActor( type, name )` | `{ id, name, displayName, summary, avatar, header, url }` or `null`. `id` is your UUID for the account (keypairs and followers are keyed by it); `name` is the handle, as in `@name@host`; `summary` is HTML; `avatar`, `header` (the profile banner; Mastodon crops it to about 3:1) and `url` (the profile page) are optional absolute URLs. |
-| `getObject( "post", id )` | `{ author, title, summary, content, url, published }` or `null`. `author` is the Person's `name`; `content` is HTML; `url` is the post's page; `published` is a date. |
+| `getObject( "post", id )` | `{ author, title, summary, content, url, published, tags }` or `null`. `author` is the Person's `name`; `content` is HTML; `url` is the post's page; `published` is a date; `tags` (optional) is an array of `{ name, url }`, sent as hashtags so posts appear in Mastodon's hashtag timelines on the servers that receive them. Names are reduced to letters, digits and underscores. |
 | `isPublic( type, id )` | Whether this account or post may be federated at all. Checked before every lookup, serving and delivery; `false` means the module behaves as if it doesn't exist. Return `false` for drafts, private content and inactive accounts. |
 
 ### Optional: `IRemoteReplies`
@@ -188,7 +188,7 @@ Call `syncPost( id )` for any post that might have changed, as often as you like
 | Post is… | Sends |
 |---|---|
 | public and never sent | `Create` |
-| public, sent, and its title, summary, content or url changed | `Update` |
+| public, sent, and its title, summary, content, url or tags changed | `Update` |
 | sent before, and now not public or gone (`getObject` returns `null`) | `Delete`; its id then answers `410 Gone` |
 | anything else | nothing |
 

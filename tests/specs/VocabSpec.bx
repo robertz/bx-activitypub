@@ -69,6 +69,33 @@ class extends="testbox.system.BaseSpec" {
 				expect( tomb.deleted ).toBe( "2026-09-28T12:00:00Z" );
 			} );
 
+			it( "adds the post's tags as hashtags, cleaned and de-duplicated", () => {
+				var article = vocab.article( "https://s.example/post/1", "https://s.example/u/robert", "https://s.example/u/robert/followers", {
+					title : "Hello", content : "<p>Hi</p>", url : "https://s.example/p", published : parseDateTime( "2026-09-28T12:00:00Z" ),
+					tags  : [
+						{ name : "BoxLang", url : "https://s.example/tag/BoxLang" },
+						{ name : "JVM Web", url : "https://s.example/tag/JVM%20Web" },
+						{ name : "boxlang", url : "https://s.example/tag/boxlang" },
+						{ name : "C++" },
+						{ name : "Café" },
+						{ name : "!!!" }
+					]
+				} );
+				expect( article.tag ).toBe( [
+					{ type : "Hashtag", name : "##BoxLang", href : "https://s.example/tag/BoxLang" },
+					{ type : "Hashtag", name : "##JVMWeb", href : "https://s.example/tag/JVM%20Web" },
+					{ type : "Hashtag", name : "##C" },
+					{ type : "Hashtag", name : "##Café" }
+				] );
+			} );
+
+			it( "leaves tag out when the post has none", () => {
+				var article = vocab.article( "https://s.example/post/1", "https://s.example/u/robert", "https://s.example/u/robert/followers", {
+					title : "Hello", content : "<p>Hi</p>", url : "https://s.example/p", published : parseDateTime( "2026-09-28T12:00:00Z" )
+				} );
+				expect( article.keyExists( "tag" ) ).toBeFalse();
+			} );
+
 			it( "formats dates as whole-second UTC", () => {
 				expect( vocab.isoDate( parseDateTime( "2026-09-28T12:00:00.789Z" ) ) ).toBe( "2026-09-28T12:00:00Z" );
 			} );

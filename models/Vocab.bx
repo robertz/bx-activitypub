@@ -5,6 +5,8 @@ class {
 
 	variables.AS_CONTEXT = "https://www.w3.org/ns/activitystreams";
 	variables.PUBLIC     = "https://www.w3.org/ns/activitystreams##Public";
+	// java.util.regex directly: BoxLang's reReplace() rejects the \p{...} Unicode classes.
+	variables.NOT_HASHTAG_CHAR = createObject( "java", "java.util.regex.Pattern" ).compile( "[^\p{L}\p{N}_]" );
 
 	/**
 	 * Accept of a Follow. The Follow is embedded (not referenced by id) because Lemmy
@@ -26,10 +28,11 @@ class {
 	}
 
 	/**
-	 * Article for author mode. post: { title, summary, content (HTML), url, published (date) }.
+	 * Article for author mode. post: { title, summary, content (HTML), url, published (date),
+	 * tags (optional array of { name, url }) }.
 	 */
 	struct function article( required string id, required string actorUrl, required string followersUrl, required struct post ) {
-		return [
+		var doc = [
 			"@context"     : variables.AS_CONTEXT,
 			"id"           : id,
 			"type"         : "Article",
@@ -43,6 +46,34 @@ class {
 			"url"          : post.url,
 			"published"    : isoDate( post.published )
 		];
+		var hashtags = hashtags( post.tags ?: [] );
+		if ( hashtags.len() ) {
+			doc[ "tag" ] = hashtags;
+		}
+		return doc;
+	}
+
+	/**
+	 * Hashtag objects for a post's tags ({ name, url }). Names are reduced to letters, digits
+	 * and underscores (what Mastodon accepts in a hashtag); empty results and case-insensitive
+	 * duplicates are dropped.
+	 */
+	array function hashtags( required array tags ) {
+		var out  = [];
+		var seen = {};
+		for ( var tag in tags ) {
+			var name = variables.NOT_HASHTAG_CHAR.matcher( isStruct( tag ) ? ( tag.name ?: "" ) : tag ).replaceAll( "" );
+			if ( !len( name ) || seen.keyExists( lCase( name ) ) ) {
+				continue;
+			}
+			seen[ lCase( name ) ] = true;
+			var hashtag = [ "type" : "Hashtag", "name" : "##" & name ];
+			if ( isStruct( tag ) && len( tag.url ?: "" ) ) {
+				hashtag[ "href" ] = tag.url;
+			}
+			out.append( hashtag );
+		}
+		return out;
 	}
 
 	/**

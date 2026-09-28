@@ -18,7 +18,7 @@
  */
 class {
 
-	variables.VERSION = "0.2.1";
+	variables.VERSION = "0.3.0";
 
 	function init( required host, required struct settings ) {
 		if ( !len( settings.datasource ?: "" ) ) {
@@ -103,7 +103,7 @@ class {
 	/**
 	 * Brings followers' copy of a post in line with the host, whatever changed:
 	 *   public, never sent                         -> Create
-	 *   public, sent, title/summary/content/url changed -> Update
+	 *   public, sent, title/summary/content/url/tags changed -> Update
 	 *   sent, now not public or gone from the host -> Delete (Tombstone)
 	 * Returns { action ("create" | "update" | "delete" | "none"), activityId, queued }.
 	 * Safe to call repeatedly: an unchanged post sends nothing. A deleted post's id stays
@@ -303,7 +303,17 @@ class {
 				return true;
 			}
 		}
-		return false;
+		return compare( hashtagNames( current ), hashtagNames( sent ) ) != 0;
+	}
+
+	private string function hashtagNames( required struct article ) {
+		var names = [];
+		for ( var tag in isArray( article.tag ?: "" ) ? article.tag : [] ) {
+			if ( isStruct( tag ) && ( tag.type ?: "" ) == "Hashtag" ) {
+				names.append( tag.name ?: "" );
+			}
+		}
+		return names.toList( " " );
 	}
 
 	private boolean function profileChanged( required struct current, required struct sent ) {
