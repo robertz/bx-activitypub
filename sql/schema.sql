@@ -44,7 +44,8 @@ CREATE TABLE IF NOT EXISTS `ApActivity` (
 	`ObjectUrl` VARCHAR(512)  DEFAULT NULL,
 	`Json`      MEDIUMTEXT    NOT NULL,
 	`CreatedAt` DATETIME(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-	PRIMARY KEY (`Id`)
+	PRIMARY KEY (`Id`),
+	KEY `IX_ApActivity_Object` (`ObjectUrl`, `Type`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ClaimToken lets several app instances share the queue: a worker claims rows with one

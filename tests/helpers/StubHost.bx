@@ -5,6 +5,29 @@ class {
 		"Person" : { "robert" : { id : "0192a6f0-0000-7000-8000-000000000002", name : "robert", displayName : "Robert", summary : "" } }
 	};
 
+	variables.POSTS = {
+		"0192a6f0-0000-7000-8000-000000000101" : {
+			author    : "robert",
+			title     : "Hello",
+			summary   : "First post",
+			content   : "<p>Body</p>",
+			url       : "https://site.example/posts/2026/09/hello",
+			published : createDateTime( 2026, 9, 28, 12, 0, 0 )
+		},
+		"0192a6f0-0000-7000-8000-000000000102" : {
+			author    : "ghost",
+			title     : "Orphan",
+			summary   : "",
+			content   : "<p>No such author</p>",
+			url       : "https://site.example/posts/2026/09/orphan",
+			published : createDateTime( 2026, 9, 28, 12, 0, 0 )
+		}
+	};
+
+	function getObject( required string type, required string id ) {
+		return type == "post" ? ( variables.POSTS[ id ] ?: javacast( "null", "" ) ) : javacast( "null", "" );
+	}
+
 	string function baseUrl() {
 		return "https://site.example";
 	}

@@ -1,0 +1,9 @@
+/**
+ * Publishes the dev host's hardcoded post. The running dev host's delivery worker sends it.
+ *   PUBLIC_BASE_URL=https://your-tunnel.example boxlang --bx-config ./boxlang.json publish.bxs
+ */
+env     = createObject( "java", "java.lang.System" ).getenv()
+baseUrl = env.get( "PUBLIC_BASE_URL" ) ?: "http://localhost:3000"
+host    = new devhost.DevHost( baseUrl )
+ap      = new bxactivitypub.models.ActivityPub( host = host, settings = { datasource : "activitypub_dev" } )
+println( jsonSerialize( ap.publishPost( host.postId() ) ) )

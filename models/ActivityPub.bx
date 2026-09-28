@@ -3,7 +3,10 @@
  *
  *   ap = new bxactivitypub.models.ActivityPub( host = myHost, settings = { datasource : "mydsn" } );
  *
- * host must provide baseUrl() and findActor( type, name ) -> { id, name, displayName, summary, avatar } or null.
+ * host must provide:
+ *   baseUrl()
+ *   findActor( type, name ) -> { id, name, displayName, summary, avatar } or null
+ *   getObject( "post", id ) -> { author (Person name), title, summary, content (HTML), url, published (date) } or null
  *
  * settings:
  *   datasource        (required) where the Ap* tables live
@@ -22,6 +25,7 @@ class {
 		}
 		var dsn = settings.datasource;
 
+		variables.host = host;
 		variables.signatures = new Signatures( settings.maxAgeSeconds ?: 3600, settings.maxFutureSeconds ?: 300 );
 		variables.vocab      = new Vocab();
 		variables.actors     = new Actors( host, variables.signatures, dsn );
@@ -45,6 +49,69 @@ class {
 			vocab        = variables.vocab
 		);
 		return this;
+	}
+
+	/**
+	 * Author mode: sends Create{Article} for a post to its author's followers.
+	 * Returns { activityId, queued, alreadyPublished }. Publishing a post that already has a
+	 * Create is a no-op; changes to it go out as Update.
+	 */
+	struct function publishPost( required string postId ) {
+		var post = variables.host.getObject( "post", postId );
+		if ( isNull( post ) ) {
+			throw( type = "BxActivityPub.NotFound", message = "Host has no post [#postId#]" );
+		}
+		var author = variables.actors.findActor( "Person", post.author );
+		if ( isNull( author ) ) {
+			throw( type = "BxActivityPub.NotFound", message = "Host has no Person [#post.author#] for post [#postId#]" );
+		}
+
+		var article  = buildArticle( postId, post, author );
+		var existing = variables.activities.findIdByObject( "Create", article.id );
+		if ( len( existing ) ) {
+			return { activityId : existing, queued : 0, alreadyPublished : true };
+		}
+
+		var actorUrl = variables.actors.actorUrl( "Person", author.name );
+		var uuid     = variables.activities.newId();
+		variables.activities.store( uuid, variables.vocab.create( variables.activities.urlFor( "Create", uuid ), actorUrl, article ) );
+
+		var inboxes = variables.followers.deliveryInboxes( "Person", author.id );
+		var keyId   = variables.actors.keyId( "Person", author.name );
+		for ( var inbox in inboxes ) {
+			variables.delivery.enqueue( uuid, "Person", author.id, keyId, inbox );
+		}
+		writeLog( text = "published #article.id# as Create #uuid# to #inboxes.len()# inbox(es)", type = "information", log = "activitypub" );
+		return { activityId : uuid, queued : inboxes.len(), alreadyPublished : false };
+	}
+
+	/**
+	 * The ActivityPub document for a local object (kind "post"), or null.
+	 */
+	function objectDocument( required string kind, required string id ) {
+		if ( kind != "post" ) {
+			return javacast( "null", "" );
+		}
+		var post = variables.host.getObject( "post", id );
+		if ( isNull( post ) ) {
+			return javacast( "null", "" );
+		}
+		var author = variables.actors.findActor( "Person", post.author );
+		if ( isNull( author ) ) {
+			return javacast( "null", "" );
+		}
+		return buildArticle( id, post, author );
+	}
+
+	/**
+	 * The object's human-facing URL, or "" (for redirecting browsers from the id path).
+	 */
+	string function objectHtmlUrl( required string kind, required string id ) {
+		if ( kind != "post" ) {
+			return "";
+		}
+		var post = variables.host.getObject( "post", id );
+		return isNull( post ) ? "" : ( post.url ?: "" );
 	}
 
 	function webfinger( required string resource ) {
@@ -88,6 +155,11 @@ class {
 			"type"       : "OrderedCollection",
 			"totalItems" : variables.followers.count( type, actor.id )
 		];
+	}
+
+	private struct function buildArticle( required string postId, required struct post, required struct author ) {
+		var actorUrl = variables.actors.actorUrl( "Person", author.name );
+		return variables.vocab.article( variables.actors.objectUrl( "post", postId ), actorUrl, actorUrl & "/followers", post );
 	}
 
 	function outboxCollection( required string type, required string name ) {

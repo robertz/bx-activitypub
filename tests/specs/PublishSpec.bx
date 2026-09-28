@@ -1,0 +1,86 @@
+class extends="testbox.system.BaseSpec" {
+
+	variables.POST_ID   = "0192a6f0-0000-7000-8000-000000000101";
+	variables.PERSON_ID = "0192a6f0-0000-7000-8000-000000000002";
+
+	function beforeAll() {
+		variables.db = new tests.helpers.TestDb();
+		db.reset();
+	}
+
+	function run() {
+		describe( "publishPost (author mode)", () => {
+
+			beforeEach( () => {
+				db.rows( "SET FOREIGN_KEY_CHECKS = 0; DELETE FROM ApDelivery; DELETE FROM ApActivity; DELETE FROM ApFollower; DELETE FROM ApRemoteActor; SET FOREIGN_KEY_CHECKS = 1;" );
+				variables.ap = new models.ActivityPub( host = new tests.helpers.StubHost(), settings = { datasource : db.dsn() } );
+			} );
+
+			it( "stores a Create{Article} and queues it once per shared inbox", () => {
+				addFollower( "https://a.example/u/1", "https://a.example/u/1/inbox", "https://a.example/inbox" );
+				addFollower( "https://a.example/u/2", "https://a.example/u/2/inbox", "https://a.example/inbox" );
+				addFollower( "https://b.example/u/1", "https://b.example/u/1/inbox", "" );
+
+				var result = ap.publishPost( POST_ID );
+				expect( result.queued ).toBe( 2 );
+				expect( result.alreadyPublished ).toBeFalse();
+
+				var queued = db.rows( "SELECT InboxUrl, SigningActorType, BIN_TO_UUID(SigningLocalId) AS LocalId, SigningKeyId FROM ApDelivery ORDER BY InboxUrl" );
+				expect( queued.map( ( r ) => r.InboxUrl ) ).toBe( [ "https://a.example/inbox", "https://b.example/u/1/inbox" ] );
+				expect( queued[ 1 ].SigningActorType ).toBe( "Person" );
+				expect( queued[ 1 ].LocalId ).toBe( PERSON_ID );
+				expect( queued[ 1 ].SigningKeyId ).toBe( "https://site.example/u/robert##main-key" );
+
+				var create = jsonDeserialize( ap.activityJson( "create", result.activityId ) );
+				expect( create.type ).toBe( "Create" );
+				expect( create.actor ).toBe( "https://site.example/u/robert" );
+				expect( create.object.type ).toBe( "Article" );
+				expect( create.object.id ).toBe( "https://site.example/post/" & POST_ID );
+				expect( create.object.url ).toBe( "https://site.example/posts/2026/09/hello" );
+			} );
+
+			it( "does not deliver to followers of other actors", () => {
+				db.rows( "INSERT INTO ApRemoteActor (Id, ActorUrl, InboxUrl, PublicKeyId, PublicKeyPem) VALUES (UUID_TO_BIN('33333333-3333-3333-3333-333333333333'), 'https://c.example/u/1', 'https://c.example/u/1/inbox', 'k', 'p')" );
+				db.rows( "INSERT INTO ApFollower (ActorType, LocalId, RemoteActorId, InboxUrl, FollowActivityId) VALUES ('Group', UUID_TO_BIN('0192a6f0-0000-7000-8000-000000000001'), UUID_TO_BIN('33333333-3333-3333-3333-333333333333'), 'https://c.example/u/1/inbox', 'f')" );
+				expect( ap.publishPost( POST_ID ).queued ).toBe( 0 );
+			} );
+
+			it( "is a no-op the second time", () => {
+				addFollower( "https://a.example/u/1", "https://a.example/u/1/inbox", "" );
+				var first  = ap.publishPost( POST_ID );
+				var second = ap.publishPost( POST_ID );
+				expect( second.alreadyPublished ).toBeTrue();
+				expect( second.activityId ).toBe( first.activityId );
+				expect( db.rows( "SELECT COUNT(*) AS N FROM ApDelivery" )[ 1 ].N ).toBe( 1 );
+			} );
+
+			it( "throws for an unknown post or author", () => {
+				expect( () => ap.publishPost( "0192a6f0-0000-7000-8000-000000000999" ) ).toThrow( "BxActivityPub.NotFound" );
+				expect( () => ap.publishPost( "0192a6f0-0000-7000-8000-000000000102" ) ).toThrow( "BxActivityPub.NotFound" );
+			} );
+
+			it( "serves the same Article at its id", () => {
+				var doc = ap.objectDocument( "post", POST_ID );
+				expect( doc[ "@context" ] ).toBe( "https://www.w3.org/ns/activitystreams" );
+				expect( doc.id ).toBe( "https://site.example/post/" & POST_ID );
+				expect( ap.objectHtmlUrl( "post", POST_ID ) ).toBe( "https://site.example/posts/2026/09/hello" );
+				expect( isNull( ap.objectDocument( "post", "nope" ) ) ).toBeTrue();
+				expect( isNull( ap.objectDocument( "comment", POST_ID ) ) ).toBeTrue();
+			} );
+
+		} );
+	}
+
+	private void function addFollower( required string actorUrl, required string inbox, required string shared ) {
+		var id = createObject( "java", "java.util.UUID" ).randomUUID().toString();
+		db.rows(
+			"INSERT INTO ApRemoteActor (Id, ActorUrl, InboxUrl, SharedInboxUrl, PublicKeyId, PublicKeyPem) VALUES (UUID_TO_BIN(:id), :actorUrl, :inbox, NULLIF(:shared, ''), 'k', 'p')",
+			{ id : id, actorUrl : actorUrl, inbox : inbox, shared : shared }
+		);
+		db.rows(
+			"INSERT INTO ApFollower (ActorType, LocalId, RemoteActorId, InboxUrl, SharedInboxUrl, FollowActivityId) VALUES ('Person', UUID_TO_BIN(:localId), UUID_TO_BIN(:id), :inbox, NULLIF(:shared, ''), :follow)",
+			{ localId : PERSON_ID, id : id, inbox : inbox, shared : shared, follow : actorUrl & "/follow" }
+		);
+	}
+
+}

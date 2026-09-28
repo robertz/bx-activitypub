@@ -4,6 +4,7 @@
 class {
 
 	variables.AS_CONTEXT = "https://www.w3.org/ns/activitystreams";
+	variables.PUBLIC     = "https://www.w3.org/ns/activitystreams##Public";
 
 	/**
 	 * Accept of a Follow. The Follow is embedded (not referenced by id) because Lemmy
@@ -22,6 +23,51 @@ class {
 				"object" : idOf( follow.object )
 			]
 		];
+	}
+
+	/**
+	 * Article for author mode. post: { title, summary, content (HTML), url, published (date) }.
+	 */
+	struct function article( required string id, required string actorUrl, required string followersUrl, required struct post ) {
+		return [
+			"@context"     : variables.AS_CONTEXT,
+			"id"           : id,
+			"type"         : "Article",
+			"attributedTo" : actorUrl,
+			"to"           : [ variables.PUBLIC ],
+			"cc"           : [ followersUrl ],
+			"name"         : post.title,
+			"summary"      : post.summary ?: "",
+			"content"      : post.content,
+			"mediaType"    : "text/html",
+			"url"          : post.url,
+			"published"    : isoDate( post.published )
+		];
+	}
+
+	/**
+	 * Create wrapping an embedded object; addressing is copied from the object.
+	 */
+	struct function create( required string id, required string actorUrl, required struct object ) {
+		var embedded = duplicate( object );
+		structDelete( embedded, "@context" );
+		return [
+			"@context"  : variables.AS_CONTEXT,
+			"id"        : id,
+			"type"      : "Create",
+			"actor"     : actorUrl,
+			"to"        : embedded.to ?: [],
+			"cc"        : embedded.cc ?: [],
+			"published" : embedded.published ?: isoDate( now() ),
+			"object"    : embedded
+		];
+	}
+
+	/**
+	 * ISO 8601 in UTC, whole seconds.
+	 */
+	string function isoDate( required date value ) {
+		return value.toInstant().truncatedTo( createObject( "java", "java.time.temporal.ChronoUnit" ).SECONDS ).toString();
 	}
 
 	/**

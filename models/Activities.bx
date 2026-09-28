@@ -50,6 +50,21 @@ class {
 		return rows[ 1 ].Json;
 	}
 
+	/**
+	 * uuid of the first stored activity of this type about objectUrl, or "".
+	 */
+	string function findIdByObject( required string type, required string objectUrl ) {
+		var rows = queryExecute(
+			"SELECT BIN_TO_UUID(Id) AS Id FROM ApActivity WHERE Type = :type AND ObjectUrl = :objectUrl ORDER BY CreatedAt LIMIT 1",
+			{
+				type      : { value : type, sqltype : "varchar" },
+				objectUrl : { value : objectUrl, sqltype : "varchar" }
+			},
+			{ datasource : variables.datasource, returntype : "array" }
+		);
+		return rows.len() ? rows[ 1 ].Id : "";
+	}
+
 	private string function objectUrlOf( required struct activity ) {
 		var obj = activity.object ?: "";
 		return isSimpleValue( obj ) ? obj : ( obj.id ?: "" );

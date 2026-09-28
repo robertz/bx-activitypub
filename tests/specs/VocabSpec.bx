@@ -16,6 +16,40 @@ class extends="testbox.system.BaseSpec" {
 				);
 			} );
 
+			it( "builds an Article addressed to Public with followers in cc", () => {
+				var article = vocab.article( "https://s.example/post/1", "https://s.example/u/robert", "https://s.example/u/robert/followers", {
+					title : "Hello", summary : "Sum", content : "<p>Hi</p>", url : "https://s.example/posts/2026/09/hello",
+					published : parseDateTime( "2026-09-28T12:00:00Z" )
+				} );
+				expect( article.type ).toBe( "Article" );
+				expect( article.attributedTo ).toBe( "https://s.example/u/robert" );
+				expect( article.to ).toBe( [ "https://www.w3.org/ns/activitystreams##Public" ] );
+				expect( article.cc ).toBe( [ "https://s.example/u/robert/followers" ] );
+				expect( article.name ).toBe( "Hello" );
+				expect( article.mediaType ).toBe( "text/html" );
+				expect( article.url ).toBe( "https://s.example/posts/2026/09/hello" );
+				expect( article.published ).toBe( "2026-09-28T12:00:00Z" );
+			} );
+
+			it( "wraps an object in a Create that copies its addressing and drops the inner @context", () => {
+				var article = vocab.article( "https://s.example/post/1", "https://s.example/u/robert", "https://s.example/u/robert/followers", {
+					title : "Hello", content : "<p>Hi</p>", url : "https://s.example/p", published : parseDateTime( "2026-09-28T12:00:00Z" )
+				} );
+				var create = vocab.create( "https://s.example/activities/create/1", "https://s.example/u/robert", article );
+				expect( create.type ).toBe( "Create" );
+				expect( create.actor ).toBe( "https://s.example/u/robert" );
+				expect( create.to ).toBe( article.to );
+				expect( create.cc ).toBe( article.cc );
+				expect( create.published ).toBe( article.published );
+				expect( create.object.id ).toBe( "https://s.example/post/1" );
+				expect( create.object.keyExists( "@context" ) ).toBeFalse();
+				expect( article.keyExists( "@context" ) ).toBeTrue();
+			} );
+
+			it( "formats dates as whole-second UTC", () => {
+				expect( vocab.isoDate( parseDateTime( "2026-09-28T12:00:00.789Z" ) ) ).toBe( "2026-09-28T12:00:00Z" );
+			} );
+
 			it( "reads ids from strings, embedded objects, and nothing", () => {
 				expect( vocab.idOf( "https://x" ) ).toBe( "https://x" );
 				expect( vocab.idOf( { id : "https://y" } ) ).toBe( "https://y" );

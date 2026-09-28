@@ -12,6 +12,21 @@ ap   = new bxactivitypub.models.ActivityPub( host = host, settings = { datasourc
 
 new bxactivitypub.adapters.express().mount( app, ap )
 
-app.get( "/", ( req, res ) => res.type( "text/plain" ).send( "bx-activitypub dev host: follow general@#ap.instanceActorDocument().preferredUsername#" ) )
+app.get( "/", ( req, res ) => res.type( "text/plain" ).send( "bx-activitypub dev host: follow robert@#ap.instanceActorDocument().preferredUsername#" ) )
+
+// Stand-in for the blog's post page, so the Article's url resolves (Mastodon fetches it for the link preview).
+app.get( "/posts/:year/:month/:slug", ( req, res, next ) => {
+	var post = host.findPostBySlug( req.params.slug )
+	if ( isNull( post ) ) {
+		return next()
+	}
+	var title = encodeForHTML( post.title )
+	var summary = encodeForHTMLAttribute( post.summary )
+	res.send( "<!doctype html><html><head><meta charset=""utf-8""><title>#title#</title>"
+		& "<meta property=""og:title"" content=""#encodeForHTMLAttribute( post.title )#"">"
+		& "<meta property=""og:description"" content=""#summary#"">"
+		& "<meta name=""description"" content=""#summary#"">"
+		& "</head><body><h1>#title#</h1>#post.content#</body></html>" )
+} )
 
 app.listen( port, () => println( "dev host on :#port#, public base #baseUrl#" ) )

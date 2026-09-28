@@ -40,6 +40,10 @@ class {
 		return baseUrl() & variables.PATHS[ type ] & name;
 	}
 
+	string function objectUrl( required string kind, required string id ) {
+		return baseUrl() & "/" & kind & "/" & id;
+	}
+
 	string function keyId( required string type, required string name ) {
 		return actorUrl( type, name ) & "##main-key";
 	}

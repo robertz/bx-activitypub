@@ -52,6 +52,23 @@ class {
 		return result.recordCount ?: 0;
 	}
 
+	/**
+	 * Distinct inboxes to deliver to: each follower's shared inbox when it has one, so a
+	 * server with many followers gets one copy.
+	 */
+	array function deliveryInboxes( required string type, required string localId ) {
+		return queryExecute(
+			"SELECT DISTINCT COALESCE(SharedInboxUrl, InboxUrl) AS InboxUrl
+			 FROM ApFollower WHERE ActorType = :type AND LocalId = UUID_TO_BIN(:localId)
+			 ORDER BY InboxUrl",
+			{
+				type    : { value : type, sqltype : "varchar" },
+				localId : { value : localId, sqltype : "varchar" }
+			},
+			{ datasource : variables.datasource, returntype : "array" }
+		).map( ( row ) => row.InboxUrl );
+	}
+
 	numeric function count( required string type, required string localId ) {
 		return queryExecute(
 			"SELECT COUNT(*) AS Total FROM ApFollower WHERE ActorType = :type AND LocalId = UUID_TO_BIN(:localId)",

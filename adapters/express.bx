@@ -31,6 +31,7 @@ class {
 			app.get( "/#prefix#/:name/followers", ( req, res ) => collectionRoute( req, res, "followers" ) );
 		}
 
+		app.get( "/post/:id", ( req, res, next ) => objectRoute( req, res, next, "post" ) );
 		app.get( "/activities/:type/:uuid", ( req, res, next ) => activityRoute( req, res, next ) );
 
 		var intervalMs = options.deliveryIntervalMs ?: 5000;
@@ -71,6 +72,21 @@ class {
 		var doc  = kind == "followers"
 			? variables.ap.followersCollection( type, req.params.name )
 			: variables.ap.outboxCollection( type, req.params.name );
+		if ( isNull( doc ) ) {
+			return res.status( 404 ).type( "text/plain" ).send( "not found" );
+		}
+		return sendActivityJson( res, doc );
+	}
+
+	/**
+	 * ActivityPub clients get the object; browsers are redirected to its HTML page.
+	 */
+	private function objectRoute( req, res, next, required string kind ) {
+		if ( !wantsActivityJson( req ) ) {
+			var htmlUrl = variables.ap.objectHtmlUrl( kind, req.params.id );
+			return len( htmlUrl ) ? res.redirect( htmlUrl, 302 ) : next();
+		}
+		var doc = variables.ap.objectDocument( kind, req.params.id );
 		if ( isNull( doc ) ) {
 			return res.status( 404 ).type( "text/plain" ).send( "not found" );
 		}
