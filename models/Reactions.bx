@@ -1,0 +1,148 @@
+/**
+ * Likes and boosts (Announce) of local posts, and their Undo. Stored in ApReaction, one per
+ * actor per type per post, and counted for the host with counts().
+ *
+ * concerns() decides, without any network access, whether an activity is worth verifying:
+ * only reactions to a local public post, or an Undo of one we stored.
+ */
+class {
+
+	variables.TYPES = [ "Like", "Announce" ];
+
+	function init( required host, required actors, required vocab, required string datasource ) {
+		variables.host       = arguments.host;
+		variables.actors     = arguments.actors;
+		variables.vocab      = arguments.vocab;
+		variables.datasource = arguments.datasource;
+		return this;
+	}
+
+	boolean function concerns( required struct activity ) {
+		var type = activity.type ?: "";
+		if ( variables.TYPES.find( type ) ) {
+			return isPublicLocalPost( variables.vocab.idOf( activity.object ?: "" ) );
+		}
+		if ( type == "Undo" ) {
+			var inner = activity.object ?: "";
+			if ( isStruct( inner ) ) {
+				return variables.TYPES.find( inner.type ?: "" ) > 0
+					&& len( variables.actors.localObjectId( "post", variables.vocab.idOf( inner.object ?: "" ) ) ) > 0;
+			}
+			return isSimpleValue( inner ) && len( inner ) && knowsActivity( inner );
+		}
+		return false;
+	}
+
+	/**
+	 * activity has passed signature verification as coming from remote. Returns { status, reason }.
+	 */
+	struct function handle( required struct activity, required struct remote ) {
+		if ( activity.type == "Undo" ) {
+			return handleUndo( activity, remote );
+		}
+		var activityId = variables.vocab.idOf( activity.id ?: "" );
+		if ( !len( activityId ) ) {
+			return result( 400, "#activity.type# has no id" );
+		}
+		var objectUrl = variables.vocab.idOf( activity.object );
+		queryExecute(
+			"INSERT IGNORE INTO ApReaction (Type, ActorUrl, ObjectUrl, ActivityId) VALUES (:type, :actor, :object, :activityId)",
+			{
+				type       : { value : activity.type, sqltype : "varchar" },
+				actor      : { value : remote.actorUrl, sqltype : "varchar" },
+				object     : { value : objectUrl, sqltype : "varchar" },
+				activityId : { value : activityId, sqltype : "varchar" }
+			},
+			{ datasource : variables.datasource }
+		);
+		writeLog( text = "#remote.actorUrl# #activity.type == 'Like' ? 'liked' : 'boosted'# #objectUrl#", type = "information", log = "activitypub" );
+		return result( 202, "recorded #activity.type#" );
+	}
+
+	/**
+	 * { likes, boosts } for a local object URL.
+	 */
+	struct function counts( required string objectUrl ) {
+		var rows = queryExecute(
+			"SELECT Type, COUNT(*) AS Total FROM ApReaction WHERE ObjectUrl = :object GROUP BY Type",
+			{ object : { value : objectUrl, sqltype : "varchar" } },
+			{ datasource : variables.datasource, returntype : "array" }
+		);
+		var out = { likes : 0, boosts : 0 };
+		for ( var row in rows ) {
+			out[ row.Type == "Like" ? "likes" : "boosts" ] = row.Total;
+		}
+		return out;
+	}
+
+	boolean function hasActor( required string actorUrl ) {
+		return queryExecute(
+			"SELECT 1 FROM ApReaction WHERE ActorUrl = :actor LIMIT 1",
+			{ actor : { value : actorUrl, sqltype : "varchar" } },
+			{ datasource : variables.datasource }
+		).recordCount > 0;
+	}
+
+	/**
+	 * The actor deleted their account. Returns how many reactions were removed.
+	 */
+	numeric function removeActor( required string actorUrl ) {
+		var deleted = {};
+		queryExecute(
+			"DELETE FROM ApReaction WHERE ActorUrl = :actor",
+			{ actor : { value : actorUrl, sqltype : "varchar" } },
+			{ datasource : variables.datasource, result : "deleted" }
+		);
+		return deleted.recordCount ?: 0;
+	}
+
+	// ---- private -------------------------------------------------------------
+
+	private struct function handleUndo( required struct activity, required struct remote ) {
+		var inner = activity.object;
+		var removed = {};
+		if ( isStruct( inner ) ) {
+			if ( compare( variables.vocab.idOf( inner.actor ?: "" ), remote.actorUrl ) != 0 ) {
+				return result( 401, "Undo of someone else's #inner.type ?: 'reaction'#" );
+			}
+			queryExecute(
+				"DELETE FROM ApReaction WHERE ActorUrl = :actor AND Type = :type AND ObjectUrl = :object",
+				{
+					actor  : { value : remote.actorUrl, sqltype : "varchar" },
+					type   : { value : inner.type, sqltype : "varchar" },
+					object : { value : variables.vocab.idOf( inner.object ?: "" ), sqltype : "varchar" }
+				},
+				{ datasource : variables.datasource, result : "removed" }
+			);
+		} else {
+			// Only the actor who reacted can undo it, however the Undo refers to it.
+			queryExecute(
+				"DELETE FROM ApReaction WHERE ActorUrl = :actor AND ActivityId = :activityId",
+				{
+					actor      : { value : remote.actorUrl, sqltype : "varchar" },
+					activityId : { value : inner, sqltype : "varchar" }
+				},
+				{ datasource : variables.datasource, result : "removed" }
+			);
+		}
+		return result( 202, "removed #removed.recordCount ?: 0# reaction(s)" );
+	}
+
+	private boolean function isPublicLocalPost( required string objectUrl ) {
+		var postId = variables.actors.localObjectId( "post", objectUrl );
+		return len( postId ) && !isNull( variables.host.getObject( "post", postId ) ) && variables.host.isPublic( "post", postId );
+	}
+
+	private boolean function knowsActivity( required string activityId ) {
+		return queryExecute(
+			"SELECT 1 FROM ApReaction WHERE ActivityId = :activityId LIMIT 1",
+			{ activityId : { value : activityId, sqltype : "varchar" } },
+			{ datasource : variables.datasource }
+		).recordCount > 0;
+	}
+
+	private struct function result( required numeric status, required string reason ) {
+		return { status : status, reason : reason };
+	}
+
+}

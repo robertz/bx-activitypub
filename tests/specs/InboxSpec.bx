@@ -37,7 +37,8 @@ class extends="testbox.system.BaseSpec" {
 					activities   = activities,
 					delivery     = delivery,
 					vocab        = new models.Vocab(),
-					replies      = createEmptyMock( "models.Replies" ).$( "concerns", false )
+					replies      = createEmptyMock( "models.Replies" ).$( "concerns", false ),
+					reactions    = createEmptyMock( "models.Reactions" ).$( "concerns", false ).$( "hasActor", false )
 				);
 			} );
 

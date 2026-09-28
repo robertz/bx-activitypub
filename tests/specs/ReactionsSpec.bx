@@ -1,0 +1,150 @@
+/**
+ * Likes and boosts, end to end through Inbox with real signatures, in the shapes Mastodon sends.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	variables.ALICE    = "https://remote.example/users/alice";
+	variables.MALLORY  = "https://remote.example/users/mallory";
+	variables.POST_ID  = "0192a6f0-0000-7000-8000-000000000101";
+	variables.DRAFT_ID = "0192a6f0-0000-7000-8000-000000000103";
+	variables.POST_URL = "https://site.example/post/0192a6f0-0000-7000-8000-000000000101";
+	variables.PUBLIC   = "https://www.w3.org/ns/activitystreams##Public";
+
+	function beforeAll() {
+		variables.db   = new tests.helpers.TestDb();
+		db.reset();
+		variables.sigs = new models.Signatures();
+		variables.keys = { "#ALICE#" : sigs.generateKeyPair(), "#MALLORY#" : sigs.generateKeyPair() };
+	}
+
+	function run() {
+		describe( "Reactions", () => {
+
+			beforeEach( () => {
+				db.rows( "SET FOREIGN_KEY_CHECKS = 0; DELETE FROM ApReaction; DELETE FROM ApRemoteObject; DELETE FROM ApFollower; DELETE FROM ApRemoteActor; SET FOREIGN_KEY_CHECKS = 1;" );
+				variables.host         = new tests.helpers.StubHost();
+				variables.remoteActors = createEmptyMock( "models.RemoteActors" )
+					.$( "forKeyId" ).$callback( ( keyId, refresh, allowStale ) => remoteFor( listFirst( keyId, "##" ) ) );
+				var actors             = new models.Actors( host, sigs, db.dsn() );
+				variables.reactions    = new models.Reactions( host = host, actors = actors, vocab = new models.Vocab(), datasource = db.dsn() );
+				variables.inbox        = new models.Inbox(
+					signatures   = sigs,
+					remoteActors = remoteActors,
+					actors       = actors,
+					followers    = new models.Followers( db.dsn() ),
+					activities   = createEmptyMock( "models.Activities" ),
+					delivery     = createEmptyMock( "models.Delivery" ),
+					vocab        = new models.Vocab(),
+					replies      = new models.Replies( host = host, actors = actors, remoteObjects = new models.RemoteObjects( db.dsn() ), remoteActors = remoteActors, followers = new models.Followers( db.dsn() ), vocab = new models.Vocab() ),
+					reactions    = reactions
+				);
+			} );
+
+			it( "counts a like, once however often it arrives", () => {
+				expect( post( like( "1" ) ).reason ).toBe( "recorded Like" );
+				post( like( "1" ) );
+				expect( reactions.counts( POST_URL ) ).toBe( { likes : 1, boosts : 0 } );
+			} );
+
+			it( "counts a boost", () => {
+				expect( post( boost( "1" ) ).reason ).toBe( "recorded Announce" );
+				expect( reactions.counts( POST_URL ) ).toBe( { likes : 0, boosts : 1 } );
+			} );
+
+			it( "counts different accounts separately", () => {
+				post( like( "1" ) );
+				post( like( "2", MALLORY ), MALLORY );
+				expect( reactions.counts( POST_URL ).likes ).toBe( 2 );
+			} );
+
+			it( "removes a like on Undo{Like} and a boost on Undo{Announce}", () => {
+				post( like( "1" ) );
+				post( boost( "1" ) );
+				post( undo( like( "1" ) ) );
+				expect( reactions.counts( POST_URL ) ).toBe( { likes : 0, boosts : 1 } );
+				post( undo( boost( "1" ) ) );
+				expect( reactions.counts( POST_URL ) ).toBe( { likes : 0, boosts : 0 } );
+			} );
+
+			it( "removes a like on an Undo that refers to it by id", () => {
+				post( like( "1" ) );
+				var byId    = undo( like( "1" ) );
+				byId.object = like( "1" ).id;
+				post( byId );
+				expect( reactions.counts( POST_URL ).likes ).toBe( 0 );
+			} );
+
+			it( "refuses to undo someone else's like", () => {
+				post( like( "1" ) );
+				var forged   = undo( like( "1" ) );
+				forged.actor = MALLORY;
+				expect( post( forged, MALLORY ).status ).toBe( 401 );
+				var byId     = { id : "#MALLORY###undo", type : "Undo", actor : MALLORY, object : like( "1" ).id };
+				post( byId, MALLORY );
+				expect( reactions.counts( POST_URL ).likes ).toBe( 1 );
+			} );
+
+			it( "ignores reactions to non-public or unknown objects without fetching a key", () => {
+				var toDraft = like( "1" );
+				toDraft.object = "https://site.example/post/#DRAFT_ID#";
+				expect( post( toDraft ).reason ).toInclude( "ignored" );
+				var elsewhere = boost( "1" );
+				elsewhere.object = "https://elsewhere.example/notes/1";
+				expect( post( elsewhere ).reason ).toInclude( "ignored" );
+				expect( remoteActors.$count( "forKeyId" ) ).toBe( 0 );
+				expect( reactions.counts( POST_URL ) ).toBe( { likes : 0, boosts : 0 } );
+			} );
+
+			it( "removes an account's reactions when the account is deleted", () => {
+				post( like( "1" ) );
+				post( boost( "1" ) );
+				var deletion = { id : "#ALICE###delete", type : "Delete", actor : ALICE, to : [ PUBLIC ], object : ALICE };
+				expect( post( deletion ).reason ).toInclude( "2 reaction(s) removed" );
+				expect( reactions.counts( POST_URL ) ).toBe( { likes : 0, boosts : 0 } );
+			} );
+
+		} );
+	}
+
+	// ---- helpers -------------------------------------------------------------
+
+	private struct function like( required string suffix, string actor = ALICE ) {
+		return { "@context" : "https://www.w3.org/ns/activitystreams", id : "#actor###likes/#suffix#", type : "Like", actor : actor, object : POST_URL };
+	}
+
+	private struct function boost( required string suffix, string actor = ALICE ) {
+		return {
+			"@context" : "https://www.w3.org/ns/activitystreams",
+			id         : "#actor#/statuses/#suffix#/activity",
+			type       : "Announce",
+			actor      : actor,
+			published  : "2026-09-28T19:00:00Z",
+			to         : [ PUBLIC ],
+			cc         : [ "https://site.example/u/robert", "#actor#/followers" ],
+			object     : POST_URL
+		};
+	}
+
+	private struct function undo( required struct inner ) {
+		var copy = duplicate( inner );
+		structDelete( copy, "@context" );
+		return { "@context" : "https://www.w3.org/ns/activitystreams", id : inner.id & "/undo", type : "Undo", actor : inner.actor, object : copy };
+	}
+
+	private struct function remoteFor( required string actorUrl ) {
+		return {
+			id : actorUrl == ALICE ? "55555555-5555-5555-5555-555555555555" : "66666666-6666-6666-6666-666666666666",
+			actorUrl : actorUrl, inboxUrl : actorUrl & "/inbox", sharedInboxUrl : "https://remote.example/inbox",
+			publicKeyId : actorUrl & "##main-key", publicKeyPem : keys[ actorUrl ].publicKeyPem,
+			name : "", handle : "", profileUrl : "", avatarUrl : "", fromCache : false
+		};
+	}
+
+	private struct function post( required struct activity, string signer = ALICE ) {
+		var body    = jsonSerialize( activity );
+		var headers = { "host" : "site.example", "date" : sigs.httpDate(), "digest" : sigs.digest( body ) };
+		headers[ "signature" ] = sigs.sign( "POST", "/inbox", headers, keys[ signer ].privateKeyPem, signer & "##main-key" );
+		return inbox.handle( "POST", "/inbox", headers, body.getBytes( "UTF-8" ) );
+	}
+
+}

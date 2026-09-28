@@ -1,14 +1,13 @@
 /**
- * Inbox: handles Follow and Undo{Follow}, and (when the host accepts them) replies to local
- * posts via Replies.bx. Everything else is acknowledged with 202 and dropped without fetching
- * anything. Every handled activity must carry a valid HTTP signature from the activity's own
- * actor.
+ * Inbox: handles Follow and Undo{Follow}; likes and boosts of local posts via Reactions.bx;
+ * (when the host accepts them) replies to local posts via Replies.bx; and account deletions
+ * of anyone we hold replies or reactions from. Everything else is acknowledged with 202 and
+ * dropped without fetching anything. Every handled activity must carry a valid HTTP
+ * signature from the activity's own actor.
  *
  * handle() returns { status, reason } for the adapter to send and log.
  */
 class {
-
-	variables.HANDLED_TYPES = [ "Follow", "Undo" ];
 
 	function init(
 		required signatures,
@@ -18,7 +17,8 @@ class {
 		required activities,
 		required delivery,
 		required vocab,
-		required replies
+		required replies,
+		required reactions
 	) {
 		variables.signatures   = arguments.signatures;
 		variables.remoteActors = arguments.remoteActors;
@@ -28,6 +28,7 @@ class {
 		variables.delivery     = arguments.delivery;
 		variables.vocab        = arguments.vocab;
 		variables.replies      = arguments.replies;
+		variables.reactions    = arguments.reactions;
 		return this;
 	}
 
@@ -46,8 +47,8 @@ class {
 		if ( !isStruct( activity ) || !isSimpleValue( activity.type ?: "" ) ) {
 			return result( 400, "body is not an activity" );
 		}
-		var isFollowing = variables.HANDLED_TYPES.find( activity.type ?: "" ) > 0;
-		if ( !isFollowing && !variables.replies.concerns( activity ) ) {
+		var destination = route( activity );
+		if ( !len( destination ) ) {
 			return result( 202, "ignored #activity.type ?: 'untyped'#" );
 		}
 
@@ -57,12 +58,54 @@ class {
 			return result( 401, verified.reason );
 		}
 
-		if ( !isFollowing ) {
-			return variables.replies.handle( activity, verified.remote );
+		switch ( destination ) {
+			case "follow":
+				return activity.type == "Follow" ? handleFollow( activity, verified.remote ) : handleUndo( activity, verified.remote );
+			case "reactions":
+				return variables.reactions.handle( activity, verified.remote );
+			case "replies":
+				return variables.replies.handle( activity, verified.remote );
+			case "account":
+				var outcome = variables.replies.handle( activity, verified.remote );
+				var removed = variables.reactions.removeActor( verified.remote.actorUrl );
+				return result( outcome.status, "#outcome.reason#, #removed# reaction(s) removed" );
 		}
-		return activity.type == "Follow"
-			? handleFollow( activity, verified.remote )
-			: handleUndo( activity, verified.remote );
+		return result( 202, "ignored #activity.type#" );
+	}
+
+	/**
+	 * Where an activity goes, decided without any network access: "follow", "reactions",
+	 * "replies", "account" (the sender deleted their account), or "" to ignore it unverified.
+	 */
+	private string function route( required struct activity ) {
+		var type = activity.type ?: "";
+		if ( type == "Follow" ) {
+			return "follow";
+		}
+		if ( type == "Undo" ) {
+			var inner = activity.object ?: "";
+			if ( isStruct( inner ) && ( inner.type ?: "" ) == "Follow" ) {
+				return "follow";
+			}
+			if ( variables.reactions.concerns( activity ) ) {
+				return "reactions";
+			}
+			// Undo by id alone: it may be one of our followers' Follow ids.
+			return isSimpleValue( inner ) && len( inner ) ? "follow" : "";
+		}
+		if ( type == "Delete" ) {
+			var objectId = variables.vocab.idOf( activity.object ?: "" );
+			if ( len( objectId ) && compare( objectId, variables.vocab.idOf( activity.actor ?: "" ) ) == 0 ) {
+				return variables.replies.concerns( activity ) || variables.reactions.hasActor( objectId ) ? "account" : "";
+			}
+		}
+		if ( variables.reactions.concerns( activity ) ) {
+			return "reactions";
+		}
+		if ( variables.replies.concerns( activity ) ) {
+			return "replies";
+		}
+		return "";
 	}
 
 	// ---- dispatch ------------------------------------------------------------

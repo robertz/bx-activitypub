@@ -10,7 +10,7 @@ class {
 	}
 
 	void function reset() {
-		queryExecute( "SET FOREIGN_KEY_CHECKS = 0; DROP TABLE IF EXISTS ApRemoteObject, ApDelivery, ApActivity, ApFollower, ApRemoteActor, ApActorKey; SET FOREIGN_KEY_CHECKS = 1;", {}, { datasource : variables.DSN } );
+		queryExecute( "SET FOREIGN_KEY_CHECKS = 0; DROP TABLE IF EXISTS ApReaction, ApRemoteObject, ApDelivery, ApActivity, ApFollower, ApRemoteActor, ApActorKey; SET FOREIGN_KEY_CHECKS = 1;", {}, { datasource : variables.DSN } );
 		queryExecute( fileRead( expandPath( "/sql/schema.sql" ) ), {}, { datasource : variables.DSN } );
 	}
 

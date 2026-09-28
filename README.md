@@ -4,7 +4,7 @@ Outbound [ActivityPub](https://www.w3.org/TR/activitypub/) federation for BoxLan
 
 Your app keeps its data; the module handles the protocol: WebFinger, actor documents, HTTP Signatures, the inbox, a delivery queue that survives restarts, and NodeInfo.
 
-**Status: 0.3.0.** Author mode (an account publishing `Article`s) is complete and verified against Mastodon. Your app can also accept **public replies** to its posts from the fediverse, and their edits and deletions, by implementing an optional second contract. Likes, boosts and everything else inbound are acknowledged and ignored.
+**Status: 0.4.0.** Author mode (an account publishing `Article`s) is complete and verified against Mastodon. Posts carry their tags as hashtags. The module counts **likes and boosts** of your posts, and your app can accept **public replies** to them, with their edits and deletions, by implementing an optional second contract. Everything else inbound is acknowledged and ignored.
 
 ## Requirements
 
@@ -27,9 +27,9 @@ mysql your_database < boxlang_modules/bx-activitypub/sql/schema.sql
 
 (That path is for an install into your app's own `boxlang_modules/`, i.e. with `--local`.)
 
-The module adds six `Ap*` tables and never reads or writes any of yours. Its classes are available as `bxModules.bxactivitypub.*`.
+The module adds seven `Ap*` tables and never reads or writes any of yours. Its classes are available as `bxModules.bxactivitypub.*`.
 
-**Upgrading from 0.1.x:** run `sql/upgrade-0.2.0.sql` once.
+**Upgrading:** from 0.1.x run `sql/upgrade-0.2.0.sql`, then (from anything before 0.4.0) `sql/upgrade-0.4.0.sql`, once each.
 
 ## How it fits together
 
@@ -198,6 +198,10 @@ A typical app runs a scheduled sweep: `syncPost` for its recent posts plus `fede
 
 **Some things are permanent.** Choose your hostname and handles before you federate for real: changing either orphans every follower. A post's id belongs forever to the account that first published it. A deleted post's id stays deleted: Mastodon won't accept it again, even if you republish the post.
 
+### Likes and boosts
+
+`reactionCounts( "post", id )` returns `{ likes, boosts }` for a post: likes and boosts from the fediverse are verified, stored once per account, removed when someone un-likes or un-boosts, and removed when their account is deleted.
+
 ## Routes
 
 The express adapter mounts these. Account and post routes answer ActivityPub requests (`Accept: application/activity+json`) and redirect browsers to the `url` from your host, or pass them through.
@@ -208,7 +212,7 @@ The express adapter mounts these. Account and post routes answer ActivityPub req
 | GET | `/.well-known/nodeinfo`, `/nodeinfo/2.1` | NodeInfo |
 | GET | `/actor` | Instance account; signs outgoing requests |
 | GET | `/u/{name}`, `/c/{name}` | Person and Group accounts |
-| POST | `/u/{name}/inbox`, `/c/{name}/inbox`, `/inbox` | Follow and Undo{Follow}; with `IRemoteReplies`, replies (Create/Update/Delete of a Note) |
+| POST | `/u/{name}/inbox`, `/c/{name}/inbox`, `/inbox` | Follow, Like, Announce (boost) and their Undo; account deletions; with `IRemoteReplies`, replies (Create/Update/Delete of a Note) |
 | GET | `/u/{name}/outbox`, `/c/{name}/outbox` | Empty collection |
 | GET | `/u/{name}/followers`, `/c/{name}/followers` | Follower count only |
 | GET | `/post/{id}` | Posts |

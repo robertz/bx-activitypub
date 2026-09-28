@@ -44,6 +44,19 @@ class {
 		return baseUrl() & "/" & kind & "/" & id;
 	}
 
+	/**
+	 * The id in one of our object URLs of this kind (e.g. "post"), or "". Exact match on the
+	 * prefix: URL paths are case-sensitive.
+	 */
+	string function localObjectId( required string kind, required string candidate ) {
+		var prefix = objectUrl( kind, "" );
+		if ( candidate.len() <= prefix.len() || compare( left( candidate, prefix.len() ), prefix ) != 0 ) {
+			return "";
+		}
+		var id = mid( candidate, prefix.len() + 1, candidate.len() );
+		return id.find( "/" ) ? "" : id;
+	}
+
 	string function keyId( required string type, required string name ) {
 		return actorUrl( type, name ) & "##main-key";
 	}

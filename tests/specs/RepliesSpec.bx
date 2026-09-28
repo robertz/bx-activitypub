@@ -154,7 +154,7 @@ class extends="testbox.system.BaseSpec" {
 				db.rows( "INSERT INTO ApFollower (ActorType, LocalId, RemoteActorId, InboxUrl, FollowActivityId) VALUES ('Person', UUID_TO_BIN('0192a6f0-0000-7000-8000-000000000002'), UUID_TO_BIN('55555555-5555-5555-5555-555555555555'), 'https://remote.example/inbox', 'f')" );
 
 				var outcome = post( deleteOf( ALICE, ALICE ) );
-				expect( outcome.reason ).toBe( "account deleted" );
+				expect( outcome.reason ).toInclude( "account deleted" );
 				expect( host.calls().delete ).toBe( [ "comment-1", "comment-2" ] );
 				expect( remoteObjectUrls() ).toBeEmpty();
 				expect( db.rows( "SELECT COUNT(*) AS N FROM ApFollower" )[ 1 ].N ).toBe( 0 );
@@ -222,7 +222,8 @@ class extends="testbox.system.BaseSpec" {
 			activities   = createEmptyMock( "models.Activities" ),
 			delivery     = createEmptyMock( "models.Delivery" ),
 			vocab        = new models.Vocab(),
-			replies      = replies
+			replies      = replies,
+			reactions    = new models.Reactions( host = host, actors = new models.Actors( host, sigs, db.dsn() ), vocab = new models.Vocab(), datasource = db.dsn() )
 		);
 	}
 

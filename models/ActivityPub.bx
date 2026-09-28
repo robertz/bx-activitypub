@@ -18,7 +18,7 @@
  */
 class {
 
-	variables.VERSION = "0.3.0";
+	variables.VERSION = "0.4.0";
 
 	function init( required host, required struct settings ) {
 		if ( !len( settings.datasource ?: "" ) ) {
@@ -56,6 +56,7 @@ class {
 			followers     = variables.followers,
 			vocab         = variables.vocab
 		);
+		variables.reactions     = new Reactions( host = host, actors = variables.actors, vocab = variables.vocab, datasource = dsn );
 		variables.inbox        = new Inbox(
 			signatures   = variables.signatures,
 			remoteActors = variables.remoteActors,
@@ -64,7 +65,8 @@ class {
 			activities   = variables.activities,
 			delivery     = variables.delivery,
 			vocab        = variables.vocab,
-			replies      = variables.replies
+			replies      = variables.replies,
+			reactions    = variables.reactions
 		);
 		return this;
 	}
@@ -166,6 +168,13 @@ class {
 		var queued = sendToFollowers( uuid, type, actor );
 		writeLog( text = "profile of #doc.id# sent as Update #uuid# to #queued# inbox(es)", type = "information", log = "activitypub" );
 		return { action : "update", activityId : uuid, queued : queued };
+	}
+
+	/**
+	 * Likes and boosts of a local object (kind "post"): { likes, boosts }.
+	 */
+	struct function reactionCounts( required string kind, required string id ) {
+		return variables.reactions.counts( variables.actors.objectUrl( kind, id ) );
 	}
 
 	/**

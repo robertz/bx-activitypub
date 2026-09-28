@@ -236,16 +236,8 @@ class {
 		return false;
 	}
 
-	/**
-	 * The local post id for one of our post URLs, or "".
-	 */
 	private string function localPostId( required string candidate ) {
-		var prefix = variables.actors.objectUrl( "post", "" );
-		if ( candidate.len() <= prefix.len() || compare( left( candidate, prefix.len() ), prefix ) != 0 ) {
-			return "";
-		}
-		var id = mid( candidate, prefix.len() + 1, candidate.len() );
-		return id.find( "/" ) ? "" : id;
+		return variables.actors.localObjectId( "post", candidate );
 	}
 
 	// compare(), not ==: BoxLang's string == ignores case, and URL paths are case-sensitive.

@@ -1,6 +1,6 @@
 {
     "name": "BxActivityPub",
-    "version": "0.3.0",
+    "version": "0.4.0",
     "author": "Robert Zehnder",
     "slug": "bx-activitypub",
     "shortDescription": "ActivityPub federation for BoxLang apps: publish posts to Mastodon and the fediverse, and accept public replies back. WebFinger, HTTP Signatures, a durable delivery queue.",
