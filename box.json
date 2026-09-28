@@ -3,14 +3,22 @@
     "version": "0.1.0",
     "author": "Robert Zehnder",
     "slug": "bx-activitypub",
-    "shortDescription": "Outbound ActivityPub federation for BoxLang apps.",
+    "shortDescription": "Outbound ActivityPub federation for BoxLang apps: WebFinger, HTTP Signatures, a durable delivery queue, and Create/Update/Delete to Mastodon and the fediverse.",
     "type": "boxlang-modules",
     "keywords": [
         "boxlang",
         "activitypub",
-        "fediverse"
+        "fediverse",
+        "mastodon",
+        "federation",
+        "webfinger"
     ],
     "homepage": "https://github.com/robertz/bx-activitypub",
+    "repository": {
+        "type": "git",
+        "URL": "https://github.com/robertz/bx-activitypub"
+    },
+    "bugs": "https://github.com/robertz/bx-activitypub/issues",
     "boxlang": {
         "minimumVersion": "1.17.0",
         "moduleName": "bxactivitypub"
@@ -38,6 +46,8 @@
         "tests/**",
         "testbox/**",
         "examples/**",
+        "docs/**",
+        "boxlang_modules/**",
         "run-tests.bxs"
     ]
 }

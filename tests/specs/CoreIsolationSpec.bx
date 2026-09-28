@@ -1,0 +1,28 @@
+/**
+ * The core must stay web-framework-agnostic: only adapters/ may know about BoxExpress, so a
+ * ColdBox (or other) adapter can be added without touching the core.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function run() {
+		describe( "Core isolation", () => {
+
+			it( "has no BoxExpress reference outside adapters/", () => {
+				var root      = expandPath( "/" );
+				var offenders = [];
+				var files     = [ root & "ModuleConfig.bx" ];
+				files.append( directoryList( root & "models", true, "path", "*.bx" ), true );
+				files.append( directoryList( root & "contracts", true, "path", "*.bx" ), true );
+				expect( files.len() ).toBeGT( 10 );
+				for ( var file in files ) {
+					if ( reFindNoCase( "boxexpress|boxlang-express", fileRead( file ) ) ) {
+						offenders.append( replace( file, root, "" ) );
+					}
+				}
+				expect( offenders ).toBeEmpty( "BoxExpress referenced in: #offenders.toList( ', ' )#" );
+			} );
+
+		} );
+	}
+
+}
