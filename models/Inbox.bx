@@ -1,0 +1,180 @@
+/**
+ * Inbox: handles Follow and Undo{Follow}; everything else is acknowledged with 202 and
+ * dropped without fetching anything. Every handled activity must carry a valid HTTP
+ * signature from the activity's own actor.
+ *
+ * handle() returns { status, reason } for the adapter to send and log.
+ */
+class {
+
+	variables.HANDLED_TYPES = [ "Follow", "Undo" ];
+
+	function init(
+		required signatures,
+		required remoteActors,
+		required actors,
+		required followers,
+		required activities,
+		required delivery,
+		required vocab
+	) {
+		variables.signatures   = arguments.signatures;
+		variables.remoteActors = arguments.remoteActors;
+		variables.actors       = arguments.actors;
+		variables.followers    = arguments.followers;
+		variables.activities   = arguments.activities;
+		variables.delivery     = arguments.delivery;
+		variables.vocab        = arguments.vocab;
+		return this;
+	}
+
+	/**
+	 * headers: lowercase names as received. body: the raw request body (binary or string).
+	 */
+	struct function handle( required string method, required string path, required struct headers, required any body ) {
+		var bodyText = isBinary( body ) ? createObject( "java", "java.lang.String" ).init( body, "UTF-8" ) : body;
+		writeLog( text = "<-- inbox #method# #path# headers=#jsonSerialize( headers )# body=#bodyText#", type = "debug", log = "activitypub" );
+
+		try {
+			var activity = jsonDeserialize( bodyText );
+		} catch ( any e ) {
+			return result( 400, "body is not JSON" );
+		}
+		if ( !isStruct( activity ) || !isSimpleValue( activity.type ?: "" ) ) {
+			return result( 400, "body is not an activity" );
+		}
+		if ( !variables.HANDLED_TYPES.findNoCase( activity.type ?: "" ) ) {
+			return result( 202, "ignored #activity.type ?: 'untyped'#" );
+		}
+
+		var verified = verify( method, path, headers, body, activity );
+		if ( !verified.valid ) {
+			writeLog( text = "inbox rejected #activity.type# from #variables.vocab.idOf( activity.actor ?: '' )#: #verified.reason#", type = "warning", log = "activitypub" );
+			return result( 401, verified.reason );
+		}
+
+		return activity.type == "Follow"
+			? handleFollow( activity, verified.remote )
+			: handleUndo( activity, verified.remote );
+	}
+
+	// ---- dispatch ------------------------------------------------------------
+
+	private struct function handleFollow( required struct activity, required struct remote ) {
+		if ( !len( variables.vocab.idOf( activity.id ?: "" ) ) ) {
+			return result( 400, "Follow has no id" );
+		}
+		var target = resolveTarget( variables.vocab.idOf( activity.object ?: "" ) );
+		if ( isNull( target ) ) {
+			return result( 404, "Follow target is not a local actor" );
+		}
+
+		variables.followers.add( target.type, target.actor.id, remote, activity.id );
+
+		var actorUrl = variables.actors.actorUrl( target.type, target.actor.name );
+		var uuid     = variables.activities.newId();
+		var accept   = variables.vocab.accept( variables.activities.urlFor( "Accept", uuid ), actorUrl, activity );
+		variables.activities.store( uuid, accept );
+		variables.delivery.enqueue( uuid, target.type, target.actor.id, variables.actors.keyId( target.type, target.actor.name ), remote.inboxUrl );
+
+		writeLog( text = "#remote.actorUrl# followed #actorUrl#; Accept #uuid# queued", type = "information", log = "activitypub" );
+		return result( 202, "accepted follow" );
+	}
+
+	private struct function handleUndo( required struct activity, required struct remote ) {
+		var inner = activity.object ?: "";
+
+		if ( isSimpleValue( inner ) ) {
+			var removed = len( inner ) ? variables.followers.removeByFollowId( remote.id, inner ) : 0;
+			return result( 202, "undo by follow id removed #removed#" );
+		}
+		if ( !isStruct( inner ) || ( inner.type ?: "" ) != "Follow" ) {
+			return result( 202, "ignored Undo of #isStruct( inner ) ? ( inner.type ?: 'untyped' ) : 'non-object'#" );
+		}
+		if ( variables.vocab.idOf( inner.actor ?: "" ) != remote.actorUrl ) {
+			return result( 401, "Undo{Follow} for someone else's Follow" );
+		}
+		var target = resolveTarget( variables.vocab.idOf( inner.object ?: "" ) );
+		if ( isNull( target ) ) {
+			return result( 202, "Undo{Follow} of unknown actor" );
+		}
+		var removed = variables.followers.remove( target.type, target.actor.id, remote.id );
+		writeLog( text = "#remote.actorUrl# unfollowed #variables.actors.actorUrl( target.type, target.actor.name )# (removed #removed#)", type = "information", log = "activitypub" );
+		return result( 202, "removed #removed#" );
+	}
+
+	// ---- verification --------------------------------------------------------
+
+	/**
+	 * { valid, reason, remote }. The Host header is taken from our configured base URL
+	 * rather than the request, so a tunnel or proxy that rewrites Host can't break
+	 * verification; a request signed for any other host still fails.
+	 */
+	private struct function verify( required string method, required string path, required struct headers, required any body, required struct activity ) {
+		if ( !len( headers.signature ?: "" ) ) {
+			return { valid : false, reason : "no Signature header" };
+		}
+		try {
+			var parsed = variables.signatures.parseSignatureHeader( headers.signature );
+		} catch ( any e ) {
+			return { valid : false, reason : e.message };
+		}
+
+		var signed  = duplicate( headers );
+		signed.host = variables.actors.authority();
+
+		try {
+			var remote = variables.remoteActors.forKeyId( parsed.keyId );
+		} catch ( BxActivityPub.KeyMismatch e ) {
+			try {
+				remote = variables.remoteActors.forKeyId( parsed.keyId, true );
+			} catch ( any e2 ) {
+				return { valid : false, reason : "key lookup failed: #e2.message#" };
+			}
+		} catch ( any e ) {
+			return { valid : false, reason : "key lookup failed: #e.message#" };
+		}
+
+		var check = variables.signatures.verifyRequest( method, path, signed, body, parsed, remote.publicKeyPem );
+		if ( !check.valid && remote.fromCache ) {
+			// The remote may have rotated its key since we cached it.
+			try {
+				remote = variables.remoteActors.forKeyId( parsed.keyId, true );
+				check  = variables.signatures.verifyRequest( method, path, signed, body, parsed, remote.publicKeyPem );
+			} catch ( any e ) {
+				return { valid : false, reason : "key refresh failed: #e.message#" };
+			}
+		}
+		if ( !check.valid ) {
+			return { valid : false, reason : check.reason };
+		}
+
+		var claimedActor = variables.vocab.idOf( activity.actor ?: "" );
+		if ( claimedActor != remote.actorUrl ) {
+			return { valid : false, reason : "activity actor #claimedActor# is not the key owner #remote.actorUrl#" };
+		}
+		return { valid : true, reason : "", remote : remote };
+	}
+
+	// ---- helpers -------------------------------------------------------------
+
+	/**
+	 * { type, actor } for a local Person/Group URL the host knows, or null.
+	 */
+	private function resolveTarget( required string targetUrl ) {
+		var localRef = variables.actors.parseLocalUrl( targetUrl );
+		if ( isNull( localRef ) ) {
+			return javacast( "null", "" );
+		}
+		var actor = variables.actors.findActor( localRef.type, localRef.name );
+		if ( isNull( actor ) ) {
+			return javacast( "null", "" );
+		}
+		return { type : localRef.type, actor : actor };
+	}
+
+	private struct function result( required numeric status, required string reason ) {
+		return { status : status, reason : reason };
+	}
+
+}

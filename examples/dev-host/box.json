@@ -1,0 +1,13 @@
+{
+    "name":"bx-activitypub-dev-host",
+    "version":"0.0.0",
+    "private":true,
+    "dependencies":{
+        "boxlang-express":"*",
+        "bx-mysql":"*"
+    },
+    "installPaths":{
+        "boxlang-express":"boxlang_modules/boxexpress/",
+        "bx-mysql":"boxlang_modules/bx-mysql/"
+    }
+}

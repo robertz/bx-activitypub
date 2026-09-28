@@ -1,0 +1,60 @@
+class extends="testbox.system.BaseSpec" {
+
+	function run() {
+		describe( "RemoteActors.parseActor", () => {
+
+			beforeEach( () => {
+				variables.remoteActors = new models.RemoteActors( createEmptyMock( "models.HttpClient" ), createEmptyMock( "models.Actors" ), "unused" );
+				variables.doc = {
+					id        : "https://mastodon.social/ap/users/1",
+					type      : "Person",
+					inbox     : "https://mastodon.social/ap/users/1/inbox",
+					endpoints : { sharedInbox : "https://mastodon.social/inbox" },
+					publicKey : { id : "https://mastodon.social/ap/users/1##main-key", owner : "https://mastodon.social/ap/users/1", publicKeyPem : "PEM" }
+				};
+			} );
+
+			it( "extracts inboxes and key from a Mastodon-shaped actor", () => {
+				var parsed = remoteActors.parseActor( doc.id, doc );
+				expect( parsed ).toBe( {
+					actorUrl       : doc.id,
+					inboxUrl       : doc.inbox,
+					sharedInboxUrl : "https://mastodon.social/inbox",
+					publicKeyId    : doc.publicKey.id,
+					publicKeyPem   : "PEM"
+				} );
+			} );
+
+			it( "tolerates a missing sharedInbox", () => {
+				structDelete( doc, "endpoints" );
+				expect( remoteActors.parseActor( doc.id, doc ).sharedInboxUrl ).toBe( "" );
+			} );
+
+			it( "rejects an actor id on a different host than requested", () => {
+				expect( () => remoteActors.parseActor( "https://evil.example/u/1", doc ) ).toThrow( "BxActivityPub.InvalidActor" );
+			} );
+
+			it( "rejects an inbox on another host", () => {
+				doc.inbox = "https://victim.example/admin";
+				expect( () => remoteActors.parseActor( doc.id, doc ) ).toThrow( "BxActivityPub.InvalidActor" );
+			} );
+
+			it( "rejects a sharedInbox on another host", () => {
+				doc.endpoints.sharedInbox = "https://victim.example/inbox";
+				expect( () => remoteActors.parseActor( doc.id, doc ) ).toThrow( "BxActivityPub.InvalidActor" );
+			} );
+
+			it( "rejects a key owned by someone else", () => {
+				doc.publicKey.owner = "https://mastodon.social/ap/users/2";
+				expect( () => remoteActors.parseActor( doc.id, doc ) ).toThrow( "BxActivityPub.InvalidActor" );
+			} );
+
+			it( "rejects an actor without a key", () => {
+				structDelete( doc, "publicKey" );
+				expect( () => remoteActors.parseActor( doc.id, doc ) ).toThrow( "BxActivityPub.InvalidActor" );
+			} );
+
+		} );
+	}
+
+}

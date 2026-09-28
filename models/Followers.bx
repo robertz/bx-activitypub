@@ -1,0 +1,66 @@
+/**
+ * ApFollower persistence: who follows which local actor.
+ */
+class {
+
+	function init( required string datasource ) {
+		variables.datasource = arguments.datasource;
+		return this;
+	}
+
+	void function add( required string type, required string localId, required struct remote, required string followActivityId ) {
+		queryExecute(
+			"INSERT INTO ApFollower (ActorType, LocalId, RemoteActorId, InboxUrl, SharedInboxUrl, FollowActivityId)
+			 VALUES (:type, UUID_TO_BIN(:localId), UUID_TO_BIN(:remoteId), :inboxUrl, :sharedInboxUrl, :followId)
+			 ON DUPLICATE KEY UPDATE InboxUrl = VALUES(InboxUrl), SharedInboxUrl = VALUES(SharedInboxUrl), FollowActivityId = VALUES(FollowActivityId)",
+			{
+				type           : { value : type, sqltype : "varchar" },
+				localId        : { value : localId, sqltype : "varchar" },
+				remoteId       : { value : remote.id, sqltype : "varchar" },
+				inboxUrl       : { value : remote.inboxUrl, sqltype : "varchar" },
+				sharedInboxUrl : { value : remote.sharedInboxUrl, sqltype : "varchar", null : !len( remote.sharedInboxUrl ) },
+				followId       : { value : followActivityId, sqltype : "varchar" }
+			},
+			{ datasource : variables.datasource }
+		);
+	}
+
+	numeric function remove( required string type, required string localId, required string remoteId ) {
+		var result = {};
+		queryExecute(
+			"DELETE FROM ApFollower WHERE ActorType = :type AND LocalId = UUID_TO_BIN(:localId) AND RemoteActorId = UUID_TO_BIN(:remoteId)",
+			{
+				type     : { value : type, sqltype : "varchar" },
+				localId  : { value : localId, sqltype : "varchar" },
+				remoteId : { value : remoteId, sqltype : "varchar" }
+			},
+			{ datasource : variables.datasource, result : "result" }
+		);
+		return result.recordCount ?: 0;
+	}
+
+	numeric function removeByFollowId( required string remoteId, required string followActivityId ) {
+		var result = {};
+		queryExecute(
+			"DELETE FROM ApFollower WHERE RemoteActorId = UUID_TO_BIN(:remoteId) AND FollowActivityId = :followId",
+			{
+				remoteId : { value : remoteId, sqltype : "varchar" },
+				followId : { value : followActivityId, sqltype : "varchar" }
+			},
+			{ datasource : variables.datasource, result : "result" }
+		);
+		return result.recordCount ?: 0;
+	}
+
+	numeric function count( required string type, required string localId ) {
+		return queryExecute(
+			"SELECT COUNT(*) AS Total FROM ApFollower WHERE ActorType = :type AND LocalId = UUID_TO_BIN(:localId)",
+			{
+				type    : { value : type, sqltype : "varchar" },
+				localId : { value : localId, sqltype : "varchar" }
+			},
+			{ datasource : variables.datasource, returntype : "array" }
+		)[ 1 ].Total;
+	}
+
+}

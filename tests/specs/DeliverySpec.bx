@@ -1,0 +1,140 @@
+class extends="testbox.system.BaseSpec" {
+
+	variables.INBOX = "https://remote.example/inbox";
+
+	function beforeAll() {
+		variables.db = new tests.helpers.TestDb();
+		db.reset();
+		variables.actors     = new models.Actors( new tests.helpers.StubHost(), new models.Signatures(), db.dsn() );
+		variables.activities = new models.Activities( actors, db.dsn() );
+	}
+
+	function run() {
+		describe( "Delivery", () => {
+
+			beforeEach( () => {
+				db.rows( "DELETE FROM ApDelivery" );
+				variables.http     = createEmptyMock( "models.HttpClient" ).$( "signedPost", { status : 202, body : "" } );
+				variables.delivery = new models.Delivery( http, actors, db.dsn() );
+			} );
+
+			it( "sends a queued activity signed with the stored key and marks it delivered", () => {
+				var id = enqueueAccept();
+				expect( delivery.runOnce() ).toBe( 1 );
+
+				var call = http.$callLog().signedPost[ 1 ];
+				expect( call[ 1 ] ).toBe( INBOX );
+				expect( jsonDeserialize( call[ 2 ] ).id ).toBe( activities.urlFor( "Accept", id ) );
+				expect( call[ 3 ] ).toBe( "https://site.example/c/general##main-key" );
+				expect( call[ 4 ] ).toBe( actors.getKeys( "Group", groupId() ).privateKeyPem );
+
+				var row = deliveryRow();
+				expect( row.Delivered ).toBe( 1 );
+				expect( row.Finished ).toBe( 1 );
+				expect( row.LastStatus ).toBe( 202 );
+				expect( row.Attempts ).toBe( 1 );
+			} );
+
+			it( "does not pick up rows that are not yet due or already claimed", () => {
+				enqueueAccept();
+				http.$( "signedPost", { status : 503, body : "busy" } );
+				expect( delivery.runOnce() ).toBe( 1 );
+				expect( delivery.runOnce() ).toBe( 0 );
+				expect( http.$count( "signedPost" ) ).toBe( 1 );
+			} );
+
+			it( "schedules a retry with backoff after a failed attempt", () => {
+				enqueueAccept();
+				http.$( "signedPost", { status : 500, body : "oops" } );
+				delivery.runOnce();
+				var row = deliveryRow();
+				expect( row.Attempts ).toBe( 1 );
+				expect( row.LastStatus ).toBe( 500 );
+				expect( row.LastError ).toBe( "oops" );
+				expect( row.Delivered ).toBe( 0 );
+				expect( row.RetryInSeconds ).toBeBetween( 50, 61 );
+			} );
+
+			it( "records a transport error with no status", () => {
+				enqueueAccept();
+				http.$( method = "signedPost", throwException = true, throwType = "BxActivityPub.UnsafeUrl", throwMessage = "nope" );
+				delivery.runOnce();
+				var row = deliveryRow();
+				expect( row.NoStatus ).toBe( 1 );
+				expect( row.LastError ).toInclude( "BxActivityPub.UnsafeUrl" );
+			} );
+
+			it( "gives up after the last backoff step", () => {
+				enqueueAccept();
+				db.rows( "UPDATE ApDelivery SET Attempts = 5" );
+				http.$( "signedPost", { status : 500, body : "" } );
+				delivery.runOnce();
+				var row = deliveryRow();
+				expect( row.Attempts ).toBe( 6 );
+				expect( row.Finished ).toBe( 1 );
+				expect( row.Delivered ).toBe( 0 );
+			} );
+
+			it( "re-claims rows whose claim lease expired", () => {
+				enqueueAccept();
+				db.rows( "UPDATE ApDelivery SET ClaimToken = UUID_TO_BIN(UUID()), NextAttemptAt = NOW(3) - INTERVAL 1 SECOND" );
+				expect( delivery.runOnce() ).toBe( 1 );
+			} );
+
+		} );
+
+		describe( "Actors.getKeys", () => {
+
+			beforeEach( () => {
+				db.rows( "DELETE FROM ApActorKey" );
+			} );
+
+			it( "generates a keypair once and reuses it", () => {
+				var fresh = new models.Actors( new tests.helpers.StubHost(), new models.Signatures(), db.dsn() );
+				var first = fresh.getKeys( "Person", "0192a6f0-0000-7000-8000-000000000002" );
+				var again = new models.Actors( new tests.helpers.StubHost(), new models.Signatures(), db.dsn() ).getKeys( "Person", "0192a6f0-0000-7000-8000-000000000002" );
+				expect( again.publicKeyPem ).toBe( first.publicKeyPem );
+				expect( db.rows( "SELECT COUNT(*) AS N FROM ApActorKey" )[ 1 ].N ).toBe( 1 );
+			} );
+
+			it( "keeps the stored keypair when another instance won the race", () => {
+				var sigs   = new models.Signatures();
+				var winner = sigs.generateKeyPair();
+				// The row appears between our read and our insert: INSERT IGNORE drops ours, we re-read theirs.
+				var racing = createMock( "models.Signatures" ).$( "generateKeyPair", sigs.generateKeyPair() );
+				racing.$( "generateKeyPair" ).$callback( () => {
+					db.rows(
+						"INSERT INTO ApActorKey (ActorType, LocalId, PublicKeyPem, PrivateKeyPem) VALUES ('Person', UUID_TO_BIN('0192a6f0-0000-7000-8000-000000000002'), :pub, :priv)",
+						{ pub : winner.publicKeyPem, priv : winner.privateKeyPem }
+					);
+					return sigs.generateKeyPair();
+				} );
+				var keys = new models.Actors( new tests.helpers.StubHost(), racing, db.dsn() ).getKeys( "Person", "0192a6f0-0000-7000-8000-000000000002" );
+				expect( keys.publicKeyPem ).toBe( winner.publicKeyPem );
+			} );
+
+		} );
+	}
+
+	private string function groupId() {
+		return "0192a6f0-0000-7000-8000-000000000001";
+	}
+
+	private string function enqueueAccept() {
+		var id = activities.newId();
+		activities.store( id, new models.Vocab().accept( activities.urlFor( "Accept", id ), "https://site.example/c/general", {
+			id : "https://remote.example/f/1", type : "Follow", actor : "https://remote.example/u/a", object : "https://site.example/c/general"
+		} ) );
+		delivery.enqueue( id, "Group", groupId(), actors.keyId( "Group", "general" ), INBOX );
+		return id;
+	}
+
+	private struct function deliveryRow() {
+		return db.rows(
+			"SELECT Attempts, LastStatus, LastStatus IS NULL AS NoStatus, LastError, DeliveredAt IS NOT NULL AS Delivered, NextAttemptAt IS NULL AS Finished,
+				TIMESTAMPDIFF(SECOND, NOW(3), NextAttemptAt) AS RetryInSeconds
+			 FROM ApDelivery"
+		)[ 1 ];
+	}
+
+}

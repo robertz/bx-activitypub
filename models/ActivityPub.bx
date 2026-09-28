@@ -1,0 +1,107 @@
+/**
+ * Facade the host app and adapters talk to. Wires the models together.
+ *
+ *   ap = new bxactivitypub.models.ActivityPub( host = myHost, settings = { datasource : "mydsn" } );
+ *
+ * host must provide baseUrl() and findActor( type, name ) -> { id, name, displayName, summary, avatar } or null.
+ *
+ * settings:
+ *   datasource        (required) where the Ap* tables live
+ *   maxAgeSeconds     oldest incoming signed Date accepted (default 3600)
+ *   maxFutureSeconds  furthest-ahead incoming signed Date accepted (default 300)
+ *   httpTimeoutSeconds outbound connect + request timeout (default 10)
+ *   userAgent         outbound User-Agent (default "bx-activitypub/{version} (+{baseUrl})")
+ */
+class {
+
+	variables.VERSION = "0.1.0";
+
+	function init( required host, required struct settings ) {
+		if ( !len( settings.datasource ?: "" ) ) {
+			throw( type = "BxActivityPub.ConfigurationException", message = "settings.datasource is required" );
+		}
+		var dsn = settings.datasource;
+
+		variables.signatures = new Signatures( settings.maxAgeSeconds ?: 3600, settings.maxFutureSeconds ?: 300 );
+		variables.vocab      = new Vocab();
+		variables.actors     = new Actors( host, variables.signatures, dsn );
+		variables.http       = new HttpClient(
+			signatures     = variables.signatures,
+			timeoutSeconds = settings.httpTimeoutSeconds ?: 10,
+			userAgent      = settings.userAgent ?: "bx-activitypub/#variables.VERSION# (+#variables.actors.baseUrl()#)"
+		);
+		variables.remoteActors = new RemoteActors( variables.http, variables.actors, dsn );
+		variables.followers    = new Followers( dsn );
+		variables.activities   = new Activities( variables.actors, dsn );
+		variables.delivery     = new Delivery( variables.http, variables.actors, dsn );
+		variables.webFinger    = new WebFinger( variables.actors );
+		variables.inbox        = new Inbox(
+			signatures   = variables.signatures,
+			remoteActors = variables.remoteActors,
+			actors       = variables.actors,
+			followers    = variables.followers,
+			activities   = variables.activities,
+			delivery     = variables.delivery,
+			vocab        = variables.vocab
+		);
+		return this;
+	}
+
+	function webfinger( required string resource ) {
+		return variables.webFinger.resolve( resource );
+	}
+
+	function actorDocument( required string type, required string name ) {
+		return variables.actors.document( type, name );
+	}
+
+	struct function instanceActorDocument() {
+		return variables.actors.instanceDocument();
+	}
+
+	struct function handleInbox( required string method, required string path, required struct headers, required any body ) {
+		return variables.inbox.handle( method, path, headers, body );
+	}
+
+	numeric function processDeliveries( numeric batchSize = 20 ) {
+		return variables.delivery.runOnce( batchSize );
+	}
+
+	/**
+	 * Stored activity JSON, or "" if unknown.
+	 */
+	string function activityJson( required string type, required string uuid ) {
+		return variables.activities.getJson( type, uuid );
+	}
+
+	/**
+	 * Followers are reported as a count only; the list itself is never published.
+	 */
+	function followersCollection( required string type, required string name ) {
+		var actor = variables.actors.findActor( type, name );
+		if ( isNull( actor ) ) {
+			return javacast( "null", "" );
+		}
+		return [
+			"@context"   : "https://www.w3.org/ns/activitystreams",
+			"id"         : variables.actors.actorUrl( type, actor.name ) & "/followers",
+			"type"       : "OrderedCollection",
+			"totalItems" : variables.followers.count( type, actor.id )
+		];
+	}
+
+	function outboxCollection( required string type, required string name ) {
+		var actor = variables.actors.findActor( type, name );
+		if ( isNull( actor ) ) {
+			return javacast( "null", "" );
+		}
+		return [
+			"@context"     : "https://www.w3.org/ns/activitystreams",
+			"id"           : variables.actors.actorUrl( type, actor.name ) & "/outbox",
+			"type"         : "OrderedCollection",
+			"totalItems"   : 0,
+			"orderedItems" : []
+		];
+	}
+
+}

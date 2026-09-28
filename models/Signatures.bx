@@ -1,0 +1,221 @@
+/**
+ * HTTP Signatures, draft-cavage style (what Mastodon and Lemmy speak), plus the
+ * Digest header, RFC 1123 dates and RSA keypair/PEM handling. Pure: no DB, no HTTP.
+ */
+class {
+
+	variables.REQUIRED_POST_HEADERS = [ "(request-target)", "host", "date", "digest" ];
+
+	function init( numeric maxAgeSeconds = 3600, numeric maxFutureSeconds = 300 ) {
+		variables.maxAgeSeconds    = arguments.maxAgeSeconds;
+		variables.maxFutureSeconds = arguments.maxFutureSeconds;
+		variables.Base64           = createObject( "java", "java.util.Base64" );
+		variables.KeyFactory       = createObject( "java", "java.security.KeyFactory" );
+		variables.httpDateFormat   = createObject( "java", "java.time.format.DateTimeFormatter" )
+			.ofPattern( "EEE, dd MMM yyyy HH:mm:ss 'GMT'", createObject( "java", "java.util.Locale" ).US );
+		return this;
+	}
+
+	// ---- keys ----------------------------------------------------------------
+
+	struct function generateKeyPair() {
+		var kpg = createObject( "java", "java.security.KeyPairGenerator" ).getInstance( "RSA" );
+		kpg.initialize( 2048 );
+		var kp = kpg.generateKeyPair();
+		return {
+			publicKeyPem  : toPem( kp.getPublic().getEncoded(), "PUBLIC KEY" ),
+			privateKeyPem : toPem( kp.getPrivate().getEncoded(), "PRIVATE KEY" )
+		};
+	}
+
+	function publicKeyFromPem( required string pem ) {
+		if ( pem.findNoCase( "BEGIN RSA PUBLIC KEY" ) ) {
+			throw( type = "BxActivityPub.UnsupportedKey", message = "PKCS##1 public keys are not supported; expected SPKI (BEGIN PUBLIC KEY)" );
+		}
+		var spec = createObject( "java", "java.security.spec.X509EncodedKeySpec" ).init( pemBytes( pem ) );
+		return variables.KeyFactory.getInstance( "RSA" ).generatePublic( spec );
+	}
+
+	function privateKeyFromPem( required string pem ) {
+		var spec = createObject( "java", "java.security.spec.PKCS8EncodedKeySpec" ).init( pemBytes( pem ) );
+		return variables.KeyFactory.getInstance( "RSA" ).generatePrivate( spec );
+	}
+
+	// ---- headers -------------------------------------------------------------
+
+	string function digest( required any body ) {
+		var md = createObject( "java", "java.security.MessageDigest" ).getInstance( "SHA-256" );
+		return "SHA-256=" & variables.Base64.getEncoder().encodeToString( md.digest( toBytes( body ) ) );
+	}
+
+	string function httpDate( numeric epochSeconds = nowEpoch() ) {
+		var instant = createObject( "java", "java.time.Instant" ).ofEpochSecond( javacast( "long", epochSeconds ) );
+		return variables.httpDateFormat.format( instant.atZone( createObject( "java", "java.time.ZoneOffset" ).UTC ) );
+	}
+
+	numeric function nowEpoch() {
+		return createObject( "java", "java.time.Instant" ).now().getEpochSecond();
+	}
+
+	/**
+	 * Builds the Signature header value. headers must hold (lowercase) every name in
+	 * signedHeaders except (request-target).
+	 */
+	string function sign(
+		required string method,
+		required string path,
+		required struct headers,
+		required string privateKeyPem,
+		required string keyId,
+		array signedHeaders = [ "(request-target)", "host", "date", "digest" ]
+	) {
+		var signingString = buildSigningString( method, path, headers, signedHeaders );
+		var signer        = createObject( "java", "java.security.Signature" ).getInstance( "SHA256withRSA" );
+		signer.initSign( privateKeyFromPem( privateKeyPem ) );
+		signer.update( toBytes( signingString ) );
+		var signature = variables.Base64.getEncoder().encodeToString( signer.sign() );
+		return 'keyId="#keyId#",algorithm="rsa-sha256",headers="#signedHeaders.toList( " " )#",signature="#signature#"';
+	}
+
+	string function buildSigningString( required string method, required string path, required struct headers, required array headerNames ) {
+		var lines = [];
+		for ( var name in headerNames ) {
+			name = lCase( name );
+			if ( name == "(request-target)" ) {
+				lines.append( "(request-target): #lCase( method )# #path#" );
+			} else {
+				if ( !headers.keyExists( name ) ) {
+					throw( type = "BxActivityPub.SignatureMissingHeader", message = "Signed header [#name#] not present" );
+				}
+				lines.append( "#name#: #trim( headers[ name ] )#" );
+			}
+		}
+		return lines.toList( char( 10 ) );
+	}
+
+	/**
+	 * Returns { keyId, algorithm, headers: [..], signature } or throws on garbage.
+	 */
+	struct function parseSignatureHeader( required string value ) {
+		var out     = {};
+		var matcher = createObject( "java", "java.util.regex.Pattern" )
+			.compile( '([A-Za-z]+)\s*=\s*"([^"]*)"' )
+			.matcher( value );
+		while ( matcher.find() ) {
+			out[ lCase( matcher.group( 1 ) ) ] = matcher.group( 2 );
+		}
+		if ( !out.keyExists( "keyid" ) || !out.keyExists( "signature" ) ) {
+			throw( type = "BxActivityPub.SignatureMalformed", message = "Signature header lacks keyId or signature" );
+		}
+		return {
+			keyId     : out.keyid,
+			algorithm : out.algorithm ?: "",
+			headers   : listToArray( lCase( out.headers ?: "date" ), " " ),
+			signature : out.signature
+		};
+	}
+
+	/**
+	 * Verifies an incoming POST. headers is a struct of lowercase header names as received
+	 * (with host set to the host the request was addressed to). Returns { valid, reason }.
+	 */
+	struct function verifyRequest(
+		required string method,
+		required string path,
+		required struct headers,
+		required any body,
+		required struct parsed,
+		required string publicKeyPem,
+		numeric now = nowEpoch()
+	) {
+		var algo = lCase( parsed.algorithm );
+		if ( len( algo ) && algo != "rsa-sha256" && algo != "hs2019" ) {
+			return fail( "unsupported algorithm [#parsed.algorithm#]" );
+		}
+
+		for ( var name in variables.REQUIRED_POST_HEADERS ) {
+			if ( !parsed.headers.findNoCase( name ) ) {
+				return fail( "signature does not cover [#name#]" );
+			}
+		}
+
+		var dateCheck = checkDate( headers.date ?: "", now );
+		if ( !dateCheck.valid ) {
+			return dateCheck;
+		}
+
+		var sentDigest = findSha256Digest( headers.digest ?: "" );
+		if ( !len( sentDigest ) ) {
+			return fail( "no SHA-256 Digest header" );
+		}
+		if ( sentDigest != digest( body ) ) {
+			return fail( "Digest does not match body" );
+		}
+
+		try {
+			var signingString = buildSigningString( method, path, headers, parsed.headers );
+			var verifier      = createObject( "java", "java.security.Signature" ).getInstance( "SHA256withRSA" );
+			verifier.initVerify( publicKeyFromPem( publicKeyPem ) );
+			verifier.update( toBytes( signingString ) );
+			if ( !verifier.verify( variables.Base64.getDecoder().decode( parsed.signature ) ) ) {
+				return fail( "signature mismatch; signing string was: " & signingString.replace( char( 10 ), " \n ", "all" ) );
+			}
+		} catch ( any e ) {
+			return fail( "verification error: #e.message#" );
+		}
+
+		return { valid : true, reason : "" };
+	}
+
+	// ---- private -------------------------------------------------------------
+
+	private struct function checkDate( required string dateHeader, required numeric now ) {
+		if ( !len( dateHeader ) ) {
+			return fail( "missing Date header" );
+		}
+		try {
+			var sent = createObject( "java", "java.time.ZonedDateTime" )
+				.parse( dateHeader, createObject( "java", "java.time.format.DateTimeFormatter" ).RFC_1123_DATE_TIME )
+				.toInstant()
+				.getEpochSecond();
+		} catch ( any e ) {
+			return fail( "unparseable Date [#dateHeader#]" );
+		}
+		if ( now - sent > variables.maxAgeSeconds ) {
+			return fail( "Date too old [#dateHeader#], #now - sent#s" );
+		}
+		if ( sent - now > variables.maxFutureSeconds ) {
+			return fail( "Date in the future [#dateHeader#], #sent - now#s" );
+		}
+		return { valid : true, reason : "" };
+	}
+
+	private string function findSha256Digest( required string header ) {
+		for ( var part in listToArray( header, "," ) ) {
+			part = trim( part );
+			if ( part.len() > 8 && lCase( left( part, 8 ) ) == "sha-256=" ) {
+				return "SHA-256=" & mid( part, 9, part.len() );
+			}
+		}
+		return "";
+	}
+
+	private struct function fail( required string reason ) {
+		return { valid : false, reason : reason };
+	}
+
+	private function toBytes( required any value ) {
+		return isBinary( value ) ? value : toString( value ).getBytes( "UTF-8" );
+	}
+
+	private function pemBytes( required string pem ) {
+		var body = pem.reReplace( "-----[A-Z ]+-----", "", "all" ).reReplace( "\s", "", "all" );
+		return variables.Base64.getDecoder().decode( body );
+	}
+
+	private string function toPem( required any der, required string label ) {
+		var encoder = variables.Base64.getMimeEncoder( 64, char( 10 ).getBytes( "UTF-8" ) );
+		return "-----BEGIN #label#-----" & char( 10 ) & encoder.encodeToString( der ) & char( 10 ) & "-----END #label#-----" & char( 10 );
+	}
+
+}

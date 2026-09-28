@@ -1,0 +1,26 @@
+{
+	"datasources": {
+		"activitypub_dev": {
+			"driver": "mysql",
+			"host": "${env.DB_HOST:127.0.0.1}",
+			"port": "${env.DB_PORT:3306}",
+			"database": "${env.DB_DATABASE:bxactivitypub_dev}",
+			"username": "${env.DB_USER:root}",
+			"custom": "allowPublicKeyRetrieval=true&useSSL=false"
+		}
+	},
+	"mappings": {
+		"/bxactivitypub": "${user-dir}/../..",
+		"/devhost": "${user-dir}"
+	},
+	"logging": {
+		"loggers": {
+			"activitypub": {
+				"level": "DEBUG",
+				"appender": "file",
+				"encoder": "text",
+				"additive": false
+			}
+		}
+	}
+}

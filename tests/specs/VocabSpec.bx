@@ -1,0 +1,30 @@
+class extends="testbox.system.BaseSpec" {
+
+	function run() {
+		describe( "Vocab", () => {
+
+			beforeEach( () => {
+				variables.vocab = new models.Vocab();
+			} );
+
+			it( "builds an Accept embedding the Follow, keys in a stable order", () => {
+				var follow = { id : "https://r.example/f/1", type : "Follow", actor : { id : "https://r.example/u/a", type : "Person" }, object : "https://s.example/c/general", extra : "dropped" };
+				var accept = vocab.accept( "https://s.example/activities/accept/1", "https://s.example/c/general", follow );
+				expect( jsonSerialize( accept ) ).toBe(
+					'{"@context":"https://www.w3.org/ns/activitystreams","id":"https://s.example/activities/accept/1","type":"Accept","actor":"https://s.example/c/general",'
+					& '"object":{"id":"https://r.example/f/1","type":"Follow","actor":"https://r.example/u/a","object":"https://s.example/c/general"}}'
+				);
+			} );
+
+			it( "reads ids from strings, embedded objects, and nothing", () => {
+				expect( vocab.idOf( "https://x" ) ).toBe( "https://x" );
+				expect( vocab.idOf( { id : "https://y" } ) ).toBe( "https://y" );
+				expect( vocab.idOf( { type : "Note" } ) ).toBe( "" );
+				expect( vocab.idOf( [ "a" ] ) ).toBe( "" );
+				expect( vocab.idOf( javacast( "null", "" ) ) ).toBe( "" );
+			} );
+
+		} );
+	}
+
+}

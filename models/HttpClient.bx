@@ -1,0 +1,135 @@
+/**
+ * Outbound HTTP for federation: signed GET/POST over java.net.http with short timeouts,
+ * a response size cap, no redirects, and a refusal to talk to non-public addresses
+ * (a remote actor document controls which URLs we fetch and POST to).
+ */
+class {
+
+	variables.ACTIVITY_ACCEPT = 'application/activity+json, application/ld+json; profile="https://www.w3.org/ns/activitystreams"';
+
+	function init( required signatures, numeric timeoutSeconds = 10, numeric maxResponseBytes = 1048576, string userAgent = "bx-activitypub" ) {
+		variables.signatures       = arguments.signatures;
+		variables.maxResponseBytes = arguments.maxResponseBytes;
+		variables.userAgent        = arguments.userAgent;
+		variables.timeout          = createObject( "java", "java.time.Duration" ).ofSeconds( arguments.timeoutSeconds );
+		variables.client           = createObject( "java", "java.net.http.HttpClient" )
+			.newBuilder()
+			.version( createObject( "java", "java.net.http.HttpClient$Version" ).HTTP_1_1 )
+			.connectTimeout( variables.timeout )
+			.followRedirects( createObject( "java", "java.net.http.HttpClient$Redirect" ).NEVER )
+			.build();
+		return this;
+	}
+
+	struct function signedGet( required string targetUrl, required string keyId, required string privateKeyPem ) {
+		var uri     = assertPublicHttps( targetUrl );
+		var headers = { "host" : hostHeader( uri ), "date" : variables.signatures.httpDate() };
+		headers[ "signature" ] = variables.signatures.sign( "GET", requestTarget( uri ), headers, privateKeyPem, keyId, [ "(request-target)", "host", "date" ] );
+		headers[ "accept" ]    = variables.ACTIVITY_ACCEPT;
+		return send( "GET", uri, headers, "" );
+	}
+
+	struct function signedPost( required string targetUrl, required string body, required string keyId, required string privateKeyPem ) {
+		var uri     = assertPublicHttps( targetUrl );
+		var headers = {
+			"host"   : hostHeader( uri ),
+			"date"   : variables.signatures.httpDate(),
+			"digest" : variables.signatures.digest( body )
+		};
+		headers[ "signature" ]    = variables.signatures.sign( "POST", requestTarget( uri ), headers, privateKeyPem, keyId );
+		headers[ "content-type" ] = "application/activity+json";
+		headers[ "accept" ]       = variables.ACTIVITY_ACCEPT;
+		return send( "POST", uri, headers, body );
+	}
+
+	/**
+	 * Throws BxActivityPub.UnsafeUrl unless the URL is https and every address its host
+	 * resolves to is public. DNS is resolved again by the HTTP client on connect, so a
+	 * rebinding DNS server can still race this check; JVM DNS caching narrows the window.
+	 */
+	function assertPublicHttps( required string targetUrl ) {
+		try {
+			var uri = createObject( "java", "java.net.URI" ).create( targetUrl );
+		} catch ( any e ) {
+			throw( type = "BxActivityPub.UnsafeUrl", message = "Unparseable URL [#targetUrl#]" );
+		}
+		if ( lCase( uri.getScheme() ?: "" ) != "https" || isNull( uri.getHost() ) ) {
+			throw( type = "BxActivityPub.UnsafeUrl", message = "Only https URLs are allowed [#targetUrl#]" );
+		}
+		try {
+			var addresses = createObject( "java", "java.net.InetAddress" ).getAllByName( uri.getHost() );
+		} catch ( any e ) {
+			throw( type = "BxActivityPub.UnsafeUrl", message = "Cannot resolve [#uri.getHost()#]" );
+		}
+		for ( var address in addresses ) {
+			if ( !isPublicAddress( address ) ) {
+				throw( type = "BxActivityPub.UnsafeUrl", message = "[#uri.getHost()#] resolves to non-public address #address.getHostAddress()#" );
+			}
+		}
+		return uri;
+	}
+
+	boolean function isPublicAddress( required address ) {
+		if ( address.isLoopbackAddress() || address.isSiteLocalAddress() || address.isLinkLocalAddress()
+			|| address.isAnyLocalAddress() || address.isMulticastAddress() ) {
+			return false;
+		}
+		var bytes = address.getAddress();
+		// IPv6 unique local fc00::/7 (isSiteLocalAddress only covers the deprecated fec0::/10)
+		if ( arrayLen( bytes ) == 16 && bitAnd( bytes[ 1 ], 254 ) == 252 ) {
+			return false;
+		}
+		// IPv4 100.64.0.0/10 carrier-grade NAT
+		if ( arrayLen( bytes ) == 4 && bitAnd( bytes[ 1 ], 255 ) == 100 && bitAnd( bytes[ 2 ], 192 ) == 64 ) {
+			return false;
+		}
+		return true;
+	}
+
+	// ---- private -------------------------------------------------------------
+
+	private struct function send( required string method, required uri, required struct headers, required string body ) {
+		var builder = createObject( "java", "java.net.http.HttpRequest" ).newBuilder( uri ).timeout( variables.timeout );
+		for ( var name in headers ) {
+			// java.net.http sets Host itself from the URI; it refuses an explicit one.
+			if ( name != "host" ) {
+				builder.header( name, headers[ name ] );
+			}
+		}
+		builder.header( "user-agent", variables.userAgent );
+		var publishers = createObject( "java", "java.net.http.HttpRequest$BodyPublishers" );
+		builder.method( method, len( body ) ? publishers.ofString( body ) : publishers.noBody() );
+
+		writeLog( text = "--> #method# #uri.toString()# headers=#jsonSerialize( headers )# body=#body#", type = "debug", log = "activitypub" );
+
+		var response = variables.client.send( builder.build(), createObject( "java", "java.net.http.HttpResponse$BodyHandlers" ).ofInputStream() );
+		var stream   = response.body();
+		try {
+			var bytes = stream.readNBytes( variables.maxResponseBytes + 1 );
+		} finally {
+			stream.close();
+		}
+		if ( arrayLen( bytes ) > variables.maxResponseBytes ) {
+			throw( type = "BxActivityPub.ResponseTooLarge", message = "Response from #uri.toString()# exceeds #variables.maxResponseBytes# bytes" );
+		}
+		var result = {
+			status      : response.statusCode(),
+			body        : createObject( "java", "java.lang.String" ).init( bytes, "UTF-8" ),
+			contentType : response.headers().firstValue( "content-type" ).orElse( "" )
+		};
+		writeLog( text = "<-- #result.status# #uri.toString()# content-type=#result.contentType# body=#left( result.body, 4000 )#", type = "debug", log = "activitypub" );
+		return result;
+	}
+
+	private string function hostHeader( required uri ) {
+		var port = uri.getPort();
+		return port == -1 || port == 443 ? lCase( uri.getHost() ) : lCase( uri.getHost() ) & ":" & port;
+	}
+
+	private string function requestTarget( required uri ) {
+		var path  = uri.getRawPath();
+		var query = uri.getRawQuery();
+		return ( len( path ?: "" ) ? path : "/" ) & ( isNull( query ) ? "" : "?" & query );
+	}
+
+}

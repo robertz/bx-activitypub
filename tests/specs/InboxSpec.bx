@@ -1,0 +1,183 @@
+class extends="testbox.system.BaseSpec" {
+
+	variables.REMOTE_ACTOR = "https://remote.example/users/alice";
+	variables.GROUP_URL    = "https://site.example/c/general";
+
+	function beforeAll() {
+		variables.sigs       = new models.Signatures();
+		variables.remoteKeys = sigs.generateKeyPair();
+		variables.otherKeys  = sigs.generateKeyPair();
+	}
+
+	function run() {
+		describe( "Inbox dispatch", () => {
+
+			beforeEach( () => {
+				variables.remote = {
+					id             : "11111111-1111-1111-1111-111111111111",
+					actorUrl       : REMOTE_ACTOR,
+					inboxUrl       : "https://remote.example/users/alice/inbox",
+					sharedInboxUrl : "https://remote.example/inbox",
+					publicKeyId    : REMOTE_ACTOR & "##main-key",
+					publicKeyPem   : remoteKeys.publicKeyPem,
+					fromCache      : false
+				};
+				variables.remoteActors = createEmptyMock( "models.RemoteActors" ).$( "forKeyId", remote );
+				variables.followers    = createEmptyMock( "models.Followers" ).$( "add" ).$( "remove", 1 ).$( "removeByFollowId", 1 );
+				variables.activities   = createEmptyMock( "models.Activities" )
+					.$( "newId", "22222222-2222-2222-2222-222222222222" )
+					.$( "urlFor", "https://site.example/activities/accept/22222222-2222-2222-2222-222222222222" )
+					.$( "store" );
+				variables.delivery = createEmptyMock( "models.Delivery" ).$( "enqueue" );
+				variables.inbox    = new models.Inbox(
+					signatures   = sigs,
+					remoteActors = remoteActors,
+					actors       = new models.Actors( new tests.helpers.StubHost(), sigs, "unused" ),
+					followers    = followers,
+					activities   = activities,
+					delivery     = delivery,
+					vocab        = new models.Vocab()
+				);
+			} );
+
+			it( "acknowledges unhandled types with 202 without fetching anything", () => {
+				var outcome = post( { type : "Like", actor : REMOTE_ACTOR, object : "x" }, false );
+				expect( outcome.status ).toBe( 202 );
+				expect( remoteActors.$count( "forKeyId" ) ).toBe( 0 );
+			} );
+
+			it( "rejects a body that is not JSON with 400", () => {
+				expect( inbox.handle( "POST", "/inbox", {}, "not json" ).status ).toBe( 400 );
+			} );
+
+			it( "rejects an unsigned Follow with 401", () => {
+				var outcome = post( follow(), false );
+				expect( outcome.status ).toBe( 401 );
+				expect( followers.$count( "add" ) ).toBe( 0 );
+			} );
+
+			it( "stores the follower and queues a signed Accept for a valid Follow", () => {
+				var outcome = post( follow() );
+				expect( outcome.status ).toBe( 202 );
+
+				var added = followers.$callLog().add[ 1 ];
+				expect( added[ 1 ] ).toBe( "Group" );
+				expect( added[ 2 ] ).toBe( "0192a6f0-0000-7000-8000-000000000001" );
+				expect( added[ 4 ] ).toBe( "https://remote.example/follows/1" );
+
+				var accept = activities.$callLog().store[ 1 ][ 2 ];
+				expect( accept.type ).toBe( "Accept" );
+				expect( accept.actor ).toBe( GROUP_URL );
+				expect( accept.object.id ).toBe( "https://remote.example/follows/1" );
+				expect( accept.object.actor ).toBe( REMOTE_ACTOR );
+				expect( accept.object.object ).toBe( GROUP_URL );
+
+				var queued = delivery.$callLog().enqueue[ 1 ];
+				expect( queued[ 2 ] ).toBe( "Group" );
+				expect( queued[ 4 ] ).toBe( GROUP_URL & "##main-key" );
+				expect( queued[ 5 ] ).toBe( remote.inboxUrl );
+			} );
+
+			it( "accepts a Follow delivered to the shared inbox", () => {
+				expect( post( follow(), true, "/inbox" ).status ).toBe( 202 );
+			} );
+
+			it( "rejects a Follow whose actor is not the key owner", () => {
+				var activity   = follow();
+				activity.actor = "https://remote.example/users/mallory";
+				expect( post( activity ).status ).toBe( 401 );
+				expect( followers.$count( "add" ) ).toBe( 0 );
+			} );
+
+			it( "rejects a Follow signed with the wrong key", () => {
+				var outcome = post( follow(), true, "/c/general/inbox", otherKeys.privateKeyPem );
+				expect( outcome.status ).toBe( 401 );
+				expect( outcome.reason ).toInclude( "signature mismatch" );
+				expect( delivery.$count( "enqueue" ) ).toBe( 0 );
+			} );
+
+			it( "refetches a cached key once when verification fails", () => {
+				var stale          = duplicate( remote );
+				stale.fromCache    = true;
+				stale.publicKeyPem = otherKeys.publicKeyPem;
+				remoteActors.$( "forKeyId" ).$results( stale, remote );
+				expect( post( follow() ).status ).toBe( 202 );
+				expect( remoteActors.$count( "forKeyId" ) ).toBe( 2 );
+			} );
+
+			it( "returns 401 when the key can't be fetched", () => {
+				remoteActors.$( method = "forKeyId", throwException = true, throwType = "BxActivityPub.RemoteFetchFailed", throwMessage = "GET returned 410" );
+				var outcome = post( follow() );
+				expect( outcome.status ).toBe( 401 );
+				expect( outcome.reason ).toInclude( "410" );
+			} );
+
+			it( "returns 404 for a Follow of an unknown local actor", () => {
+				var activity    = follow();
+				activity.object = "https://site.example/c/nope";
+				expect( post( activity ).status ).toBe( 404 );
+			} );
+
+			it( "returns 404 for a Follow of a remote actor", () => {
+				var activity    = follow();
+				activity.object = "https://elsewhere.example/c/general";
+				expect( post( activity ).status ).toBe( 404 );
+			} );
+
+			it( "removes the follower on Undo{Follow}", () => {
+				var outcome = post( { id : "https://remote.example/undo/1", type : "Undo", actor : REMOTE_ACTOR, object : follow() } );
+				expect( outcome.status ).toBe( 202 );
+				var removed = followers.$callLog().remove[ 1 ];
+				expect( removed[ 1 ] ).toBe( "Group" );
+				expect( removed[ 2 ] ).toBe( "0192a6f0-0000-7000-8000-000000000001" );
+				expect( removed[ 3 ] ).toBe( remote.id );
+			} );
+
+			it( "removes by Follow id when Undo references the Follow by URL", () => {
+				post( { id : "https://remote.example/undo/1", type : "Undo", actor : REMOTE_ACTOR, object : "https://remote.example/follows/1" } );
+				expect( followers.$callLog().removeByFollowId[ 1 ] ).toBe( [ remote.id, "https://remote.example/follows/1" ] );
+			} );
+
+			it( "refuses to Undo someone else's Follow", () => {
+				var inner   = follow();
+				inner.actor = "https://remote.example/users/bob";
+				var outcome = post( { id : "https://remote.example/undo/1", type : "Undo", actor : REMOTE_ACTOR, object : inner } );
+				expect( outcome.status ).toBe( 401 );
+				expect( followers.$count( "remove" ) ).toBe( 0 );
+			} );
+
+			it( "ignores Undo of anything other than Follow", () => {
+				var outcome = post( { id : "https://remote.example/undo/1", type : "Undo", actor : REMOTE_ACTOR, object : { type : "Like", id : "x" } } );
+				expect( outcome.status ).toBe( 202 );
+				expect( followers.$count( "remove" ) + followers.$count( "removeByFollowId" ) ).toBe( 0 );
+			} );
+
+			it( "verifies against the configured host, not the Host header received", () => {
+				var headers = signedHeaders( jsonSerialize( follow() ), "/c/general/inbox", remoteKeys.privateKeyPem );
+				headers.host = "127.0.0.1:3000";
+				expect( inbox.handle( "POST", "/c/general/inbox", headers, jsonSerialize( follow() ) ).status ).toBe( 202 );
+			} );
+
+		} );
+	}
+
+	// ---- helpers -------------------------------------------------------------
+
+	private struct function follow() {
+		return { id : "https://remote.example/follows/1", type : "Follow", actor : REMOTE_ACTOR, object : GROUP_URL };
+	}
+
+	private struct function post( required struct activity, boolean sign = true, string path = "/c/general/inbox", string pem = remoteKeys.privateKeyPem ) {
+		var body    = jsonSerialize( activity );
+		var headers = sign ? signedHeaders( body, path, pem ) : { "host" : "site.example" };
+		return inbox.handle( "POST", path, headers, body.getBytes( "UTF-8" ) );
+	}
+
+	private struct function signedHeaders( required string body, required string path, required string pem ) {
+		var headers = { "host" : "site.example", "date" : sigs.httpDate(), "digest" : sigs.digest( body ) };
+		headers[ "signature" ] = sigs.sign( "POST", path, headers, pem, REMOTE_ACTOR & "##main-key" );
+		headers[ "content-type" ] = "application/activity+json";
+		return headers;
+	}
+
+}

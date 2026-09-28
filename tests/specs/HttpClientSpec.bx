@@ -1,0 +1,32 @@
+class extends="testbox.system.BaseSpec" {
+
+	function run() {
+		describe( "HttpClient URL safety", () => {
+
+			beforeEach( () => {
+				variables.http        = new models.HttpClient( new models.Signatures() );
+				variables.InetAddress = createObject( "java", "java.net.InetAddress" );
+			} );
+
+			it( "treats ordinary public addresses as public", () => {
+				expect( http.isPublicAddress( InetAddress.getByName( "8.8.8.8" ) ) ).toBeTrue();
+				expect( http.isPublicAddress( InetAddress.getByName( "2001:4860:4860::8888" ) ) ).toBeTrue();
+			} );
+
+			it( "rejects loopback, private, link-local, CGNAT and IPv6 unique-local addresses", () => {
+				for ( var address in [ "127.0.0.1", "10.1.2.3", "172.16.0.1", "192.168.1.1", "169.254.169.254", "100.64.0.1", "0.0.0.0", "::1", "fe80::1", "fd00::1", "fc00::1" ] ) {
+					expect( http.isPublicAddress( InetAddress.getByName( address ) ) ).toBeFalse( address );
+				}
+			} );
+
+			it( "rejects non-https and unresolvable URLs", () => {
+				expect( () => http.assertPublicHttps( "http://mastodon.social/inbox" ) ).toThrow( "BxActivityPub.UnsafeUrl" );
+				expect( () => http.assertPublicHttps( "https://localhost/inbox" ) ).toThrow( "BxActivityPub.UnsafeUrl" );
+				expect( () => http.assertPublicHttps( "https://127.0.0.1/inbox" ) ).toThrow( "BxActivityPub.UnsafeUrl" );
+				expect( () => http.assertPublicHttps( "not a url" ) ).toThrow( "BxActivityPub.UnsafeUrl" );
+			} );
+
+		} );
+	}
+
+}

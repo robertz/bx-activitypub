@@ -1,0 +1,160 @@
+class extends="testbox.system.BaseSpec" {
+
+	function beforeAll() {
+		variables.sigs  = new models.Signatures( maxAgeSeconds = 3600, maxFutureSeconds = 300 );
+		variables.keys  = sigs.generateKeyPair();
+		variables.other = sigs.generateKeyPair();
+		variables.now   = sigs.nowEpoch();
+		variables.path  = "/c/general/inbox";
+		variables.body  = '{"type":"Follow","actor":"https://remote.example/users/alice"}';
+	}
+
+	private struct function signedHeaders( string forBody = variables.body, numeric at = variables.now, string pem = variables.keys.privateKeyPem ) {
+		var headers = {
+			"host"   : "site.example",
+			"date"   : sigs.httpDate( at ),
+			"digest" : sigs.digest( forBody )
+		};
+		headers[ "signature" ] = sigs.sign( "POST", variables.path, headers, pem, "https://remote.example/users/alice##main-key" );
+		return headers;
+	}
+
+	private struct function verify( required struct headers, string forBody = variables.body, string pem = variables.keys.publicKeyPem ) {
+		var parsed = sigs.parseSignatureHeader( headers.signature );
+		return sigs.verifyRequest( "POST", variables.path, headers, forBody, parsed, pem, variables.now );
+	}
+
+	function run() {
+		describe( "Signatures", () => {
+
+			it( "round-trips sign then verify", () => {
+				var result = verify( signedHeaders() );
+				expect( result.reason ).toBe( "" );
+				expect( result.valid ).toBeTrue();
+			} );
+
+			it( "verifies a body passed as bytes the same as a string", () => {
+				expect( verify( signedHeaders(), body.getBytes( "UTF-8" ) ).valid ).toBeTrue();
+			} );
+
+			it( "fails when the body is tampered with", () => {
+				var result = verify( signedHeaders(), body.replace( "alice", "mallory" ) );
+				expect( result.valid ).toBeFalse();
+				expect( result.reason ).toInclude( "Digest" );
+			} );
+
+			it( "fails when the Digest header is recomputed for a tampered body", () => {
+				var headers    = signedHeaders();
+				var tampered   = body.replace( "alice", "mallory" );
+				headers.digest = sigs.digest( tampered );
+				var result     = verify( headers, tampered );
+				expect( result.valid ).toBeFalse();
+				expect( result.reason ).toInclude( "signature mismatch" );
+			} );
+
+			it( "fails on a stale Date", () => {
+				var result = verify( signedHeaders( at = now - 3601 ) );
+				expect( result.valid ).toBeFalse();
+				expect( result.reason ).toInclude( "too old" );
+			} );
+
+			it( "fails on a Date too far in the future", () => {
+				var result = verify( signedHeaders( at = now + 301 ) );
+				expect( result.valid ).toBeFalse();
+				expect( result.reason ).toInclude( "future" );
+			} );
+
+			it( "accepts a Date just inside the window", () => {
+				expect( verify( signedHeaders( at = now - 3599 ) ).valid ).toBeTrue();
+			} );
+
+			it( "fails with the wrong public key", () => {
+				var result = verify( signedHeaders(), body, other.publicKeyPem );
+				expect( result.valid ).toBeFalse();
+				expect( result.reason ).toInclude( "signature mismatch" );
+			} );
+
+			it( "fails when the request-target differs", () => {
+				var headers = signedHeaders();
+				var parsed  = sigs.parseSignatureHeader( headers.signature );
+				var result  = sigs.verifyRequest( "POST", "/c/other/inbox", headers, body, parsed, keys.publicKeyPem, now );
+				expect( result.valid ).toBeFalse();
+			} );
+
+			it( "fails when the host differs", () => {
+				var headers  = signedHeaders();
+				headers.host = "evil.example";
+				expect( verify( headers ).valid ).toBeFalse();
+			} );
+
+			it( "rejects a signature that does not cover digest", () => {
+				var headers = { "host" : "site.example", "date" : sigs.httpDate( now ), "digest" : sigs.digest( body ) };
+				headers[ "signature" ] = sigs.sign( "POST", path, headers, keys.privateKeyPem, "k", [ "(request-target)", "host", "date" ] );
+				var result = verify( headers );
+				expect( result.valid ).toBeFalse();
+				expect( result.reason ).toInclude( "digest" );
+			} );
+
+			it( "rejects an unsupported algorithm", () => {
+				var headers       = signedHeaders();
+				headers.signature = headers.signature.replace( "rsa-sha256", "ed25519" );
+				expect( verify( headers ).reason ).toInclude( "unsupported algorithm" );
+			} );
+
+			it( "accepts hs2019 as the algorithm label", () => {
+				var headers       = signedHeaders();
+				headers.signature = headers.signature.replace( "rsa-sha256", "hs2019" );
+				expect( verify( headers ).valid ).toBeTrue();
+			} );
+
+			it( "verifies a signature produced independently by openssl", () => {
+				// Fixture: openssl genpkey + `openssl dgst -sha256 -sign` over the signing string below.
+				var pub     = "-----BEGIN PUBLIC KEY-----|MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA8misL34nJ8iznQt6ryzy|jmeXB2WU7rtxHspUMRPdoQfKBO0e5ezMyCBiy5iSpMxII6I0h8Uw/YStNQAJToMj|fL0jeeOHEzntZOGf7xHNwnF54ERC+iz3UEIk5xrLGYwit9jpdZ4RxBoDm8UJNItP|KUSU2+velyLgkrxTJkCLLgVyQUybXpBaBH6wtL0raeP+kbjbmNt4zLpvb8l0FZFn|QJdlx5GwcPKBIYJ+CDYT9mvsX5pY3p7fx611GErcfhIhR4AXGykazaoL8/RbHmWx|7swMuLFgfSND7qW691IzhXkq+zTAjR3EePUyjChuFaq9vPOprNA88jDY8Oy5lbZF|IQIDAQAB|-----END PUBLIC KEY-----|".replace( "|", char( 10 ), "all" );
+				var headers = {
+					"host"      : "site.example",
+					"date"      : "Mon, 28 Sep 2026 12:00:00 GMT",
+					"digest"    : "SHA-256=GYwYnH3BiO6aICFt0ThC5bUIJ4byvqdpWtR8m5fNkww=",
+					"signature" : 'keyId="https://remote.example/actor##main-key",algorithm="rsa-sha256",headers="(request-target) host date digest",signature="C5IcRClI0kgqSoNkzcax3CctvQj20cuvqGwirvWoKeSHAsi/tnKyYt8mi+xtRjA7YNaqkeqsFNCWBScOMNgndpPmsBirQIkR+PIVfAMy3fq/WoxmOsjtptCSqRgB+pbzUtlvHYuve0yeyXuY59598I52Pm1EG9v7DrNvZaxNJxRxDC++MjR4RD+0M2jQ2eSSgax3Hhqgi2SC8gUs6jc+dtFpwPovEz4stn5Y+QH51wSL4bSYzK+7HlBbBhIyLGFYEeq/ILX9cChl0ge824squFZQQ1feoM19W9j7wj86WqPFDzmHKT41pKXITy6e+0wLwEEizPH6uPO9bvc/bXBVqA=="'
+				};
+				var parsed = sigs.parseSignatureHeader( headers.signature );
+				var result = sigs.verifyRequest( "POST", "/c/general/inbox", headers, '{"type":"Follow"}', parsed, pub, 1790596800 + 10 );
+				expect( result.reason ).toBe( "" );
+				expect( result.valid ).toBeTrue();
+			} );
+
+			it( "parses a Mastodon-shaped Signature header", () => {
+				var parsed = sigs.parseSignatureHeader( 'keyId="https://mastodon.social/ap/users/1##main-key",algorithm="rsa-sha256",headers="(request-target) host date digest content-type",signature="abc="' );
+				expect( parsed.keyId ).toBe( "https://mastodon.social/ap/users/1##main-key" );
+				expect( parsed.headers ).toBe( [ "(request-target)", "host", "date", "digest", "content-type" ] );
+				expect( parsed.signature ).toBe( "abc=" );
+			} );
+
+			it( "throws on a header without keyId", () => {
+				expect( () => sigs.parseSignatureHeader( 'signature="abc"' ) ).toThrow( "BxActivityPub.SignatureMalformed" );
+			} );
+
+			it( "finds SHA-256 among several digests", () => {
+				var headers    = signedHeaders();
+				headers.digest = "SHA-512=zzz, " & headers.digest;
+				// digest is part of the signing string, so re-sign with the combined value
+				structDelete( headers, "signature" );
+				headers[ "signature" ] = sigs.sign( "POST", path, headers, keys.privateKeyPem, "k" );
+				expect( verify( headers ).valid ).toBeTrue();
+			} );
+
+			it( "formats HTTP dates as RFC 1123 with a two-digit day", () => {
+				expect( sigs.httpDate( 784111777 ) ).toBe( "Sun, 06 Nov 1994 08:49:37 GMT" );
+			} );
+
+			it( "computes the SHA-256 digest of an empty body", () => {
+				expect( sigs.digest( "" ) ).toBe( "SHA-256=47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=" );
+			} );
+
+			it( "rejects PKCS##1 public keys with a clear error", () => {
+				expect( () => sigs.publicKeyFromPem( "-----BEGIN RSA PUBLIC KEY-----\nAAAA\n-----END RSA PUBLIC KEY-----" ) ).toThrow( "BxActivityPub.UnsupportedKey" );
+			} );
+
+		} );
+	}
+
+}

@@ -1,0 +1,12 @@
+{
+	"datasources": {
+		"bxactivitypub_test": {
+			"driver": "mysql",
+			"host": "${env.DB_HOST:127.0.0.1}",
+			"port": "${env.DB_PORT:3306}",
+			"database": "${env.DB_TEST_DATABASE:bxactivitypub_test}",
+			"username": "${env.DB_USER:root}",
+			"custom": "allowPublicKeyRetrieval=true&useSSL=false&allowMultiQueries=true"
+		}
+	}
+}

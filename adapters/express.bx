@@ -1,0 +1,119 @@
+/**
+ * Mounts the ActivityPub routes on a BoxExpress app and schedules the delivery worker.
+ * Mount it before the app's own page routes: actor/object GETs only answer requests that
+ * ask for ActivityPub JSON and call next() for everything else, so the HTML page still wins
+ * for browsers.
+ *
+ *   new bxactivitypub.adapters.express().mount( app, ap );
+ */
+class {
+
+	variables.AP_CONTENT_TYPE = "application/activity+json; charset=utf-8";
+	variables.TYPES           = { "u" : "Person", "c" : "Group" };
+
+	/**
+	 * options:
+	 *   maxInboxBytes       largest inbox POST body accepted (default 262144)
+	 *   deliveryIntervalMs  delivery worker tick (default 5000); 0 disables scheduling
+	 */
+	function mount( required app, required ap, struct options = {} ) {
+		variables.ap            = ap;
+		variables.maxInboxBytes = options.maxInboxBytes ?: 262144;
+
+		app.get( "/.well-known/webfinger", ( req, res ) => webfingerRoute( req, res ) );
+		app.get( "/actor", ( req, res ) => sendActivityJson( res, variables.ap.instanceActorDocument() ) );
+		app.post( "/inbox", ( req, res ) => inboxRoute( req, res ) );
+
+		for ( var prefix in variables.TYPES ) {
+			app.get( "/#prefix#/:name", ( req, res, next ) => actorRoute( req, res, next ) );
+			app.post( "/#prefix#/:name/inbox", ( req, res ) => inboxRoute( req, res ) );
+			app.get( "/#prefix#/:name/outbox", ( req, res ) => collectionRoute( req, res, "outbox" ) );
+			app.get( "/#prefix#/:name/followers", ( req, res ) => collectionRoute( req, res, "followers" ) );
+		}
+
+		app.get( "/activities/:type/:uuid", ( req, res, next ) => activityRoute( req, res, next ) );
+
+		var intervalMs = options.deliveryIntervalMs ?: 5000;
+		if ( intervalMs > 0 ) {
+			app.schedule( intervalMs, () => variables.ap.processDeliveries(), { name : "activitypub-delivery" } );
+		}
+		return this;
+	}
+
+	// ---- routes --------------------------------------------------------------
+
+	private function webfingerRoute( req, res ) {
+		res.set( "Access-Control-Allow-Origin", "*" );
+		var resource = req.query.resource ?: "";
+		if ( !len( resource ) ) {
+			return res.status( 400 ).type( "text/plain" ).send( "resource is required" );
+		}
+		var jrd = variables.ap.webfinger( resource );
+		if ( isNull( jrd ) ) {
+			return res.status( 404 ).type( "text/plain" ).send( "not found" );
+		}
+		return res.type( "application/jrd+json; charset=utf-8" ).send( jsonSerialize( jrd ) );
+	}
+
+	private function actorRoute( req, res, next ) {
+		if ( !wantsActivityJson( req ) ) {
+			return next();
+		}
+		var doc = variables.ap.actorDocument( typeFromPath( req.path ), req.params.name );
+		if ( isNull( doc ) ) {
+			return res.status( 404 ).type( "text/plain" ).send( "not found" );
+		}
+		return sendActivityJson( res, doc );
+	}
+
+	private function collectionRoute( req, res, required string kind ) {
+		var type = typeFromPath( req.path );
+		var doc  = kind == "followers"
+			? variables.ap.followersCollection( type, req.params.name )
+			: variables.ap.outboxCollection( type, req.params.name );
+		if ( isNull( doc ) ) {
+			return res.status( 404 ).type( "text/plain" ).send( "not found" );
+		}
+		return sendActivityJson( res, doc );
+	}
+
+	private function activityRoute( req, res, next ) {
+		var json = variables.ap.activityJson( req.params.type, req.params.uuid );
+		if ( !len( json ) ) {
+			return res.status( 404 ).type( "text/plain" ).send( "not found" );
+		}
+		return res.type( variables.AP_CONTENT_TYPE ).send( json );
+	}
+
+	private function inboxRoute( req, res ) {
+		var stream = req.bodyStream();
+		var body   = stream.readNBytes( variables.maxInboxBytes + 1 );
+		if ( arrayLen( body ) > variables.maxInboxBytes ) {
+			return res.status( 413 ).type( "text/plain" ).send( "body too large" );
+		}
+		var headers = {};
+		for ( var name in req.headers ) {
+			headers[ lCase( name ) ] = req.headers[ name ];
+		}
+		var outcome = variables.ap.handleInbox( req.method, req.originalUrl, headers, body );
+		writeLog( text = "inbox #req.originalUrl# -> #outcome.status# #outcome.reason#", type = "debug", log = "activitypub" );
+		return res.status( outcome.status ).type( "text/plain" ).send( outcome.reason );
+	}
+
+	// ---- helpers -------------------------------------------------------------
+
+	private function sendActivityJson( res, required struct doc ) {
+		return res.type( variables.AP_CONTENT_TYPE ).send( jsonSerialize( doc ) );
+	}
+
+	private boolean function wantsActivityJson( req ) {
+		var accept = lCase( req.get( "Accept" ) ?: "" );
+		return accept.find( "application/activity+json" )
+			|| ( accept.find( "application/ld+json" ) && accept.find( "https://www.w3.org/ns/activitystreams" ) );
+	}
+
+	private string function typeFromPath( required string path ) {
+		return variables.TYPES[ listFirst( path, "/" ) ];
+	}
+
+}

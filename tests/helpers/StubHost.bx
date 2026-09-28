@@ -1,0 +1,16 @@
+class {
+
+	variables.ACTORS = {
+		"Group"  : { "general" : { id : "0192a6f0-0000-7000-8000-000000000001", name : "general", displayName : "General", summary : "" } },
+		"Person" : { "robert" : { id : "0192a6f0-0000-7000-8000-000000000002", name : "robert", displayName : "Robert", summary : "" } }
+	};
+
+	string function baseUrl() {
+		return "https://site.example";
+	}
+
+	function findActor( required string type, required string name ) {
+		return variables.ACTORS[ type ][ name ] ?: javacast( "null", "" );
+	}
+
+}

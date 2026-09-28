@@ -1,0 +1,67 @@
+/**
+ * WebFinger (RFC 7033) for local actors: acct:name@host or an actor URL -> JRD.
+ */
+class {
+
+	// Lookup order when a name exists as both; how to handle that collision is an open question for milestone 3.
+	variables.LOOKUP_ORDER = [ "Group", "Person" ];
+
+	function init( required actors ) {
+		variables.actors = arguments.actors;
+		return this;
+	}
+
+	/**
+	 * The JRD struct, or null when the resource isn't ours or doesn't exist.
+	 */
+	function resolve( required string resource ) {
+		var hostName = variables.actors.hostName();
+
+		if ( lCase( left( resource, 5 ) ) == "acct:" ) {
+			var acct = mid( resource, 6, resource.len() );
+			if ( listLen( acct, "@" ) != 2 ) {
+				return javacast( "null", "" );
+			}
+			var name   = listFirst( acct, "@" );
+			var domain = lCase( listLast( acct, "@" ) );
+			if ( domain != hostName ) {
+				return javacast( "null", "" );
+			}
+			if ( lCase( name ) == hostName ) {
+				return jrd( hostName, variables.actors.actorUrl( "Application", "" ), false );
+			}
+			for ( var type in variables.LOOKUP_ORDER ) {
+				var actor = variables.actors.findActor( type, name );
+				if ( !isNull( actor ) ) {
+					return jrd( actor.name, variables.actors.actorUrl( type, actor.name ), true );
+				}
+			}
+			return javacast( "null", "" );
+		}
+
+		if ( resource == variables.actors.actorUrl( "Application", "" ) ) {
+			return jrd( hostName, resource, false );
+		}
+		var localRef = variables.actors.parseLocalUrl( resource );
+		if ( !isNull( localRef ) ) {
+			var actor = variables.actors.findActor( localRef.type, localRef.name );
+			if ( !isNull( actor ) ) {
+				return jrd( actor.name, variables.actors.actorUrl( localRef.type, actor.name ), true );
+			}
+		}
+		return javacast( "null", "" );
+	}
+
+	private struct function jrd( required string name, required string actorUrl, required boolean hasProfilePage ) {
+		var links = [ [ "rel" : "self", "type" : "application/activity+json", "href" : actorUrl ] ];
+		if ( hasProfilePage ) {
+			links.append( [ "rel" : "http://webfinger.net/rel/profile-page", "type" : "text/html", "href" : actorUrl ] );
+		}
+		return [
+			"subject" : "acct:#name#@#variables.actors.hostName()#",
+			"aliases" : [ actorUrl ],
+			"links"   : links
+		];
+	}
+
+}

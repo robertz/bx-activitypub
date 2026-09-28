@@ -1,0 +1,19 @@
+/**
+ * bx-activitypub module descriptor. The module owns the ActivityPub protocol; the host
+ * app owns its data and hands the facade an object with baseUrl() and findActor().
+ * See models/ActivityPub.bx.
+ */
+class {
+
+	this.version     = "0.1.0";
+	this.mapping     = "bxactivitypub";
+	this.author      = "Robert Zehnder";
+	this.description = "Outbound ActivityPub federation for BoxLang apps.";
+	this.webURL      = "https://github.com/robertz/bx-activitypub";
+	this.disabled    = false;
+
+	function configure() {
+		settings = {};
+	}
+
+}

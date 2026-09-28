@@ -1,0 +1,17 @@
+/**
+ * Dev host for bx-activitypub.
+ *   PUBLIC_BASE_URL=https://your-tunnel.example boxlang --bx-config ./boxlang.json app.bxs
+ */
+env     = createObject( "java", "java.lang.System" ).getenv()
+baseUrl = env.get( "PUBLIC_BASE_URL" ) ?: "http://localhost:3000"
+port    = val( env.get( "PORT" ) ?: 3000 )
+
+app  = boxExpress()
+host = new devhost.DevHost( baseUrl )
+ap   = new bxactivitypub.models.ActivityPub( host = host, settings = { datasource : "activitypub_dev" } )
+
+new bxactivitypub.adapters.express().mount( app, ap )
+
+app.get( "/", ( req, res ) => res.type( "text/plain" ).send( "bx-activitypub dev host: follow general@#ap.instanceActorDocument().preferredUsername#" ) )
+
+app.listen( port, () => println( "dev host on :#port#, public base #baseUrl#" ) )

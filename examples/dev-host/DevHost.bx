@@ -1,0 +1,30 @@
+/**
+ * Milestone 1-2 stand-in for the real host app: one hardcoded Group.
+ */
+class {
+
+	variables.ACTORS = {
+		"Group" : {
+			"general" : {
+				id          : "0192a6f0-0000-7000-8000-000000000001",
+				name        : "general",
+				displayName : "General",
+				summary     : "<p>bx-activitypub test group</p>"
+			}
+		}
+	};
+
+	function init( required string baseUrl ) {
+		variables.base = arguments.baseUrl;
+		return this;
+	}
+
+	string function baseUrl() {
+		return variables.base;
+	}
+
+	function findActor( required string type, required string name ) {
+		return variables.ACTORS[ type ][ name ] ?: javacast( "null", "" );
+	}
+
+}

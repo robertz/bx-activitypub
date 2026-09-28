@@ -1,0 +1,58 @@
+/**
+ * ApActivity persistence. Every activity we send is stored so its id dereferences
+ * at /activities/{type}/{uuid}.
+ */
+class {
+
+	function init( required actors, required string datasource ) {
+		variables.actors     = arguments.actors;
+		variables.datasource = arguments.datasource;
+		return this;
+	}
+
+	string function newId() {
+		return createObject( "java", "java.util.UUID" ).randomUUID().toString();
+	}
+
+	string function urlFor( required string type, required string uuid ) {
+		return variables.actors.baseUrl() & "/activities/" & lCase( type ) & "/" & uuid;
+	}
+
+	void function store( required string uuid, required struct activity ) {
+		queryExecute(
+			"INSERT INTO ApActivity (Id, Type, ActorUrl, ObjectUrl, Json) VALUES (UUID_TO_BIN(:id), :type, :actorUrl, :objectUrl, :json)",
+			{
+				id        : { value : uuid, sqltype : "varchar" },
+				type      : { value : activity.type, sqltype : "varchar" },
+				actorUrl  : { value : activity.actor, sqltype : "varchar" },
+				objectUrl : { value : objectUrlOf( activity ), sqltype : "varchar" },
+				json      : { value : jsonSerialize( activity ), sqltype : "longvarchar" }
+			},
+			{ datasource : variables.datasource }
+		);
+	}
+
+	/**
+	 * The stored JSON string, or "" when there is no activity of that type with that id.
+	 */
+	string function getJson( required string type, required string uuid ) {
+		if ( !isValid( "regex", uuid, "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}" ) ) {
+			return "";
+		}
+		var rows = queryExecute(
+			"SELECT Type, Json FROM ApActivity WHERE Id = UUID_TO_BIN(:id)",
+			{ id : { value : uuid, sqltype : "varchar" } },
+			{ datasource : variables.datasource, returntype : "array" }
+		);
+		if ( !rows.len() || lCase( rows[ 1 ].Type ) != lCase( type ) ) {
+			return "";
+		}
+		return rows[ 1 ].Json;
+	}
+
+	private string function objectUrlOf( required struct activity ) {
+		var obj = activity.object ?: "";
+		return isSimpleValue( obj ) ? obj : ( obj.id ?: "" );
+	}
+
+}

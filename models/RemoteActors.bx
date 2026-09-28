@@ -1,0 +1,149 @@
+/**
+ * Fetches remote actors (signed GET as the instance actor) and caches their inbox
+ * and public key in ApRemoteActor.
+ *
+ * Returned shape: { id, actorUrl, inboxUrl, sharedInboxUrl, publicKeyId, publicKeyPem, fromCache }.
+ */
+class {
+
+	function init( required httpClient, required actors, required string datasource, numeric ttlSeconds = 86400 ) {
+		variables.http       = arguments.httpClient;
+		variables.actors     = arguments.actors;
+		variables.datasource = arguments.datasource;
+		variables.ttlSeconds = arguments.ttlSeconds;
+		return this;
+	}
+
+	/**
+	 * Resolves the actor that owns keyId. Only the Mastodon/Lemmy shape is supported:
+	 * keyId = "{actorUrl}#main-key", with publicKey.id equal to keyId.
+	 */
+	struct function forKeyId( required string keyId, boolean refresh = false ) {
+		var actorUrl = listFirst( keyId, "##" );
+		var remote   = refresh ? javacast( "null", "" ) : readFresh( actorUrl );
+		if ( isNull( remote ) ) {
+			remote = fetchAndStore( actorUrl );
+		}
+		if ( remote.publicKeyId != keyId ) {
+			throw( type = "BxActivityPub.KeyMismatch", message = "Actor #remote.actorUrl# publishes key #remote.publicKeyId#, request was signed with #keyId#" );
+		}
+		return remote;
+	}
+
+	struct function fetchAndStore( required string actorUrl ) {
+		var signer   = variables.actors.instanceSigner();
+		var response = variables.http.signedGet( actorUrl, signer.keyId, signer.privateKeyPem );
+		if ( response.status < 200 || response.status > 299 ) {
+			throw( type = "BxActivityPub.RemoteFetchFailed", message = "GET #actorUrl# returned #response.status#" );
+		}
+		try {
+			var doc = jsonDeserialize( response.body );
+		} catch ( any e ) {
+			throw( type = "BxActivityPub.RemoteFetchFailed", message = "GET #actorUrl# did not return JSON" );
+		}
+		var parsed = parseActor( actorUrl, doc );
+
+		queryExecute(
+			"INSERT INTO ApRemoteActor (ActorUrl, InboxUrl, SharedInboxUrl, PublicKeyId, PublicKeyPem, FetchedAt)
+			 VALUES (:actorUrl, :inboxUrl, :sharedInboxUrl, :publicKeyId, :publicKeyPem, NOW(3))
+			 ON DUPLICATE KEY UPDATE InboxUrl = VALUES(InboxUrl), SharedInboxUrl = VALUES(SharedInboxUrl),
+				PublicKeyId = VALUES(PublicKeyId), PublicKeyPem = VALUES(PublicKeyPem), FetchedAt = NOW(3)",
+			{
+				actorUrl       : { value : parsed.actorUrl, sqltype : "varchar" },
+				inboxUrl       : { value : parsed.inboxUrl, sqltype : "varchar" },
+				sharedInboxUrl : { value : parsed.sharedInboxUrl, sqltype : "varchar", null : !len( parsed.sharedInboxUrl ) },
+				publicKeyId    : { value : parsed.publicKeyId, sqltype : "varchar" },
+				publicKeyPem   : { value : parsed.publicKeyPem, sqltype : "longvarchar" }
+			},
+			{ datasource : variables.datasource }
+		);
+		var stored = read( parsed.actorUrl, false );
+		stored.fromCache = false;
+		return stored;
+	}
+
+	/**
+	 * Validates a fetched actor document. The document's id must be on the host we fetched
+	 * it from, and its inboxes must be on that same host: otherwise a (real, verified)
+	 * remote actor could point our delivery worker at any URL it likes.
+	 */
+	struct function parseActor( required string requestedUrl, required any doc ) {
+		if ( !isStruct( doc ) || !isSimpleValue( doc.id ?: "" ) || !len( doc.id ?: "" ) ) {
+			throw( type = "BxActivityPub.InvalidActor", message = "#requestedUrl# is not an actor document" );
+		}
+		var host = hostOf( requestedUrl );
+		if ( hostOf( doc.id ) != host ) {
+			throw( type = "BxActivityPub.InvalidActor", message = "Actor id #doc.id# is not on #host#" );
+		}
+		var key = doc.publicKey ?: {};
+		if ( isArray( key ) ) {
+			key = key.len() ? key[ 1 ] : {};
+		}
+		if ( !isStruct( key ) || !len( key.id ?: "" ) || !len( key.publicKeyPem ?: "" ) ) {
+			throw( type = "BxActivityPub.InvalidActor", message = "Actor #doc.id# has no publicKey" );
+		}
+		if ( ( key.owner ?: doc.id ) != doc.id ) {
+			throw( type = "BxActivityPub.InvalidActor", message = "Key #key.id# is owned by #key.owner#, not #doc.id#" );
+		}
+		var inboxUrl       = isSimpleValue( doc.inbox ?: "" ) ? ( doc.inbox ?: "" ) : "";
+		var sharedInboxUrl = "";
+		if ( isStruct( doc.endpoints ?: "" ) && isSimpleValue( doc.endpoints.sharedInbox ?: "" ) ) {
+			sharedInboxUrl = doc.endpoints.sharedInbox ?: "";
+		}
+		if ( !len( inboxUrl ) || hostOf( inboxUrl ) != host ) {
+			throw( type = "BxActivityPub.InvalidActor", message = "Actor #doc.id# inbox [#inboxUrl#] is not on #host#" );
+		}
+		if ( len( sharedInboxUrl ) && hostOf( sharedInboxUrl ) != host ) {
+			throw( type = "BxActivityPub.InvalidActor", message = "Actor #doc.id# sharedInbox [#sharedInboxUrl#] is not on #host#" );
+		}
+		return {
+			actorUrl       : doc.id,
+			inboxUrl       : inboxUrl,
+			sharedInboxUrl : sharedInboxUrl,
+			publicKeyId    : key.id,
+			publicKeyPem   : key.publicKeyPem
+		};
+	}
+
+	// ---- private -------------------------------------------------------------
+
+	private function readFresh( required string actorUrl ) {
+		return read( actorUrl, true );
+	}
+
+	private function read( required string actorUrl, required boolean freshOnly ) {
+		var params = { actorUrl : { value : actorUrl, sqltype : "varchar" } };
+		if ( freshOnly ) {
+			params.ttl = { value : variables.ttlSeconds, sqltype : "integer" };
+		}
+		var rows = queryExecute(
+			"SELECT BIN_TO_UUID(Id) AS Id, ActorUrl, InboxUrl, SharedInboxUrl, PublicKeyId, PublicKeyPem
+			 FROM ApRemoteActor
+			 WHERE ActorUrl = :actorUrl" & ( freshOnly ? " AND FetchedAt > NOW(3) - INTERVAL :ttl SECOND" : "" ),
+			params,
+			{ datasource : variables.datasource, returntype : "array" }
+		);
+		if ( !rows.len() ) {
+			return javacast( "null", "" );
+		}
+		var row = rows[ 1 ];
+		return {
+			id             : row.Id,
+			actorUrl       : row.ActorUrl,
+			inboxUrl       : row.InboxUrl,
+			sharedInboxUrl : row.SharedInboxUrl ?: "",
+			publicKeyId    : row.PublicKeyId,
+			publicKeyPem   : row.PublicKeyPem,
+			fromCache      : true
+		};
+	}
+
+	private string function hostOf( required string candidate ) {
+		try {
+			return lCase( createObject( "java", "java.net.URI" ).create( candidate ).getHost() ?: "" );
+		} catch ( any e ) {
+			return "";
+		}
+	}
+
+}

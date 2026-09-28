@@ -1,0 +1,45 @@
+class extends="testbox.system.BaseSpec" {
+
+	function run() {
+		describe( "WebFinger", () => {
+
+			beforeEach( () => {
+				variables.webFinger = new models.WebFinger( new models.Actors( new tests.helpers.StubHost(), new models.Signatures(), "unused" ) );
+			} );
+
+			it( "resolves a Group by acct", () => {
+				var jrd = webFinger.resolve( "acct:general@site.example" );
+				expect( jrd.subject ).toBe( "acct:general@site.example" );
+				expect( jrd.links[ 1 ] ).toBe( { rel : "self", type : "application/activity+json", href : "https://site.example/c/general" } );
+			} );
+
+			it( "resolves a Person by acct", () => {
+				expect( webFinger.resolve( "acct:robert@site.example" ).links[ 1 ].href ).toBe( "https://site.example/u/robert" );
+			} );
+
+			it( "resolves by actor URL", () => {
+				expect( webFinger.resolve( "https://site.example/c/general" ).subject ).toBe( "acct:general@site.example" );
+			} );
+
+			it( "treats the domain case-insensitively", () => {
+				expect( isNull( webFinger.resolve( "acct:general@SITE.example" ) ) ).toBeFalse();
+			} );
+
+			it( "resolves the instance actor as acct:domain@domain", () => {
+				var jrd = webFinger.resolve( "acct:site.example@site.example" );
+				expect( jrd.links[ 1 ].href ).toBe( "https://site.example/actor" );
+				expect( jrd.links ).toHaveLength( 1 );
+			} );
+
+			it( "returns null for other domains, unknown names and garbage", () => {
+				expect( isNull( webFinger.resolve( "acct:general@elsewhere.example" ) ) ).toBeTrue();
+				expect( isNull( webFinger.resolve( "acct:nobody@site.example" ) ) ).toBeTrue();
+				expect( isNull( webFinger.resolve( "acct:general" ) ) ).toBeTrue();
+				expect( isNull( webFinger.resolve( "acct:a@b@site.example" ) ) ).toBeTrue();
+				expect( isNull( webFinger.resolve( "https://site.example/c/general/inbox" ) ) ).toBeTrue();
+			} );
+
+		} );
+	}
+
+}

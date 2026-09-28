@@ -1,0 +1,21 @@
+/**
+ * Resets the Ap* tables in the test database from sql/schema.sql.
+ */
+class {
+
+	variables.DSN = "bxactivitypub_test";
+
+	string function dsn() {
+		return variables.DSN;
+	}
+
+	void function reset() {
+		queryExecute( "SET FOREIGN_KEY_CHECKS = 0; DROP TABLE IF EXISTS ApDelivery, ApActivity, ApFollower, ApRemoteActor, ApActorKey; SET FOREIGN_KEY_CHECKS = 1;", {}, { datasource : variables.DSN } );
+		queryExecute( fileRead( expandPath( "/sql/schema.sql" ) ), {}, { datasource : variables.DSN } );
+	}
+
+	array function rows( required string sql, struct params = {} ) {
+		return queryExecute( sql, params, { datasource : variables.DSN, returntype : "array" } );
+	}
+
+}

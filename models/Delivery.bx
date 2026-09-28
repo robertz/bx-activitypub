@@ -1,0 +1,123 @@
+/**
+ * DB-backed delivery queue (ApDelivery). Safe to run on several app instances at once:
+ * each run claims due rows with a single UPDATE ... LIMIT tagged with its own token, and a
+ * claim expires after CLAIM_LEASE_MINUTES so rows held by a crashed worker come back.
+ */
+class {
+
+	// Minutes to wait after each failed attempt; once exhausted the delivery is abandoned.
+	variables.BACKOFF_MINUTES     = [ 1, 5, 30, 120, 720 ];
+	variables.CLAIM_LEASE_MINUTES = 5;
+
+	function init( required httpClient, required actors, required string datasource ) {
+		variables.http       = arguments.httpClient;
+		variables.actors     = arguments.actors;
+		variables.datasource = arguments.datasource;
+		return this;
+	}
+
+	void function enqueue(
+		required string activityId,
+		required string signingType,
+		required string signingLocalId,
+		required string signingKeyId,
+		required string inboxUrl
+	) {
+		queryExecute(
+			"INSERT INTO ApDelivery (ActivityId, SigningActorType, SigningLocalId, SigningKeyId, InboxUrl, NextAttemptAt)
+			 VALUES (UUID_TO_BIN(:activityId), :signingType, UUID_TO_BIN(:signingLocalId), :signingKeyId, :inboxUrl, NOW(3))",
+			{
+				activityId     : { value : activityId, sqltype : "varchar" },
+				signingType    : { value : signingType, sqltype : "varchar" },
+				signingLocalId : { value : signingLocalId, sqltype : "varchar" },
+				signingKeyId   : { value : signingKeyId, sqltype : "varchar" },
+				inboxUrl       : { value : inboxUrl, sqltype : "varchar" }
+			},
+			{ datasource : variables.datasource }
+		);
+	}
+
+	/**
+	 * Claims and sends up to batchSize due deliveries. Returns the number attempted.
+	 */
+	numeric function runOnce( numeric batchSize = 20 ) {
+		var token = createObject( "java", "java.util.UUID" ).randomUUID().toString();
+		queryExecute(
+			"UPDATE ApDelivery
+			 SET ClaimToken = UUID_TO_BIN(:token), NextAttemptAt = NOW(3) + INTERVAL #variables.CLAIM_LEASE_MINUTES# MINUTE
+			 WHERE NextAttemptAt <= NOW(3)
+			 ORDER BY NextAttemptAt
+			 LIMIT #int( batchSize )#",
+			{ token : { value : token, sqltype : "varchar" } },
+			{ datasource : variables.datasource }
+		);
+		var rows = queryExecute(
+			"SELECT BIN_TO_UUID(D.Id) AS Id, D.SigningActorType, BIN_TO_UUID(D.SigningLocalId) AS SigningLocalId,
+				D.SigningKeyId, D.InboxUrl, D.Attempts, A.Json
+			 FROM ApDelivery D
+			 JOIN ApActivity A ON A.Id = D.ActivityId
+			 WHERE D.ClaimToken = UUID_TO_BIN(:token)",
+			{ token : { value : token, sqltype : "varchar" } },
+			{ datasource : variables.datasource, returntype : "array" }
+		);
+		for ( var row in rows ) {
+			deliver( row );
+		}
+		return rows.len();
+	}
+
+	// ---- private -------------------------------------------------------------
+
+	private void function deliver( required struct row ) {
+		var status = javacast( "null", "" );
+		var error  = "";
+		try {
+			var keys     = variables.actors.getKeys( row.SigningActorType, row.SigningLocalId );
+			var response = variables.http.signedPost( row.InboxUrl, row.Json, row.SigningKeyId, keys.privateKeyPem );
+			status       = response.status;
+			if ( status >= 200 && status <= 299 ) {
+				markDelivered( row.Id, status );
+				return;
+			}
+			error = left( response.body, 1000 );
+		} catch ( any e ) {
+			error = left( e.type & ": " & e.message, 1000 );
+		}
+		var statusText = isNull( status ) ? "no response" : status;
+		writeLog( text = "delivery #row.Id# to #row.InboxUrl# failed (attempt #row.Attempts + 1#): #statusText# #error#", type = "warning", log = "activitypub" );
+		markFailed( row.Id, row.Attempts + 1, isNull( status ) ? 0 : status, error );
+	}
+
+	private void function markDelivered( required string id, required numeric status ) {
+		queryExecute(
+			"UPDATE ApDelivery SET DeliveredAt = NOW(3), NextAttemptAt = NULL, ClaimToken = NULL, LastStatus = :status,
+				Attempts = Attempts + 1, LastError = NULL
+			 WHERE Id = UUID_TO_BIN(:id)",
+			{
+				id     : { value : id, sqltype : "varchar" },
+				status : { value : status, sqltype : "integer" }
+			},
+			{ datasource : variables.datasource }
+		);
+	}
+
+	// status 0 = no HTTP response (timeout, refused, unsafe URL)
+	private void function markFailed( required string id, required numeric attempts, required numeric status, required string error ) {
+		var nextSql = attempts <= variables.BACKOFF_MINUTES.len()
+			? "NOW(3) + INTERVAL #variables.BACKOFF_MINUTES[ attempts ]# MINUTE"
+			: "NULL";
+		queryExecute(
+			"UPDATE ApDelivery SET Attempts = :attempts, LastStatus = :status, LastError = :error, ClaimToken = NULL,
+				NextAttemptAt = #nextSql#
+			 WHERE Id = UUID_TO_BIN(:id)",
+			{
+				id       : { value : id, sqltype : "varchar" },
+				attempts : { value : attempts, sqltype : "integer" },
+				status   : { value : status, sqltype : "integer", null : status == 0 },
+				error    : { value : error, sqltype : "varchar" }
+			},
+			{ datasource : variables.datasource }
+		);
+	}
+
+}

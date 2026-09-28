@@ -1,0 +1,43 @@
+/**
+ * ActivityStreams builders. Pure: returns ordered structs, no IO.
+ */
+class {
+
+	variables.AS_CONTEXT = "https://www.w3.org/ns/activitystreams";
+
+	/**
+	 * Accept of a Follow. The Follow is embedded (not referenced by id) because Lemmy
+	 * requires the object to be the Follow itself.
+	 */
+	struct function accept( required string id, required string actorUrl, required struct follow ) {
+		return [
+			"@context" : variables.AS_CONTEXT,
+			"id"       : id,
+			"type"     : "Accept",
+			"actor"    : actorUrl,
+			"object"   : [
+				"id"     : follow.id,
+				"type"   : "Follow",
+				"actor"  : idOf( follow.actor ),
+				"object" : idOf( follow.object )
+			]
+		];
+	}
+
+	/**
+	 * The id of a property that may be either a URL string or an embedded object.
+	 */
+	string function idOf( any value ) {
+		if ( isNull( value ) ) {
+			return "";
+		}
+		if ( isSimpleValue( value ) ) {
+			return value;
+		}
+		if ( isStruct( value ) && value.keyExists( "id" ) && isSimpleValue( value.id ) ) {
+			return value.id;
+		}
+		return "";
+	}
+
+}

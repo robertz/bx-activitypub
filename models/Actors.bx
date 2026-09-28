@@ -1,0 +1,184 @@
+/**
+ * Local actors: URLs, actor documents and lazily generated keypairs.
+ *
+ * Types: "Person" (/u/{name}), "Group" (/c/{name}), and the instance actor
+ * "Application" (/actor), which signs outbound GETs.
+ */
+class {
+
+	variables.PATHS              = { "Person" : "/u/", "Group" : "/c/" };
+	variables.INSTANCE_LOCAL_ID  = "00000000-0000-0000-0000-000000000000";
+	variables.CONTEXT            = [ "https://www.w3.org/ns/activitystreams", "https://w3id.org/security/v1" ];
+
+	function init( required host, required signatures, required string datasource ) {
+		variables.host       = arguments.host;
+		variables.signatures = arguments.signatures;
+		variables.datasource = arguments.datasource;
+		variables.keyCache   = {};
+		return this;
+	}
+
+	string function baseUrl() {
+		return variables.host.baseUrl().reReplace( "/+$", "" );
+	}
+
+	string function hostName() {
+		return createObject( "java", "java.net.URI" ).create( baseUrl() ).getHost().lCase();
+	}
+
+	/**
+	 * host[:port] of the base URL: what a remote server puts in the Host header it signs.
+	 */
+	string function authority() {
+		return createObject( "java", "java.net.URI" ).create( baseUrl() ).getRawAuthority().lCase();
+	}
+
+	string function actorUrl( required string type, required string name ) {
+		if ( type == "Application" ) {
+			return baseUrl() & "/actor";
+		}
+		return baseUrl() & variables.PATHS[ type ] & name;
+	}
+
+	string function keyId( required string type, required string name ) {
+		return actorUrl( type, name ) & "##main-key";
+	}
+
+	/**
+	 * The host's actor struct (id, name, displayName, summary, avatar) or null.
+	 */
+	function findActor( required string type, required string name ) {
+		if ( !variables.PATHS.keyExists( type ) ) {
+			return javacast( "null", "" );
+		}
+		return variables.host.findActor( type, name );
+	}
+
+	/**
+	 * { type, name } for one of our Person/Group actor URLs, or null.
+	 */
+	function parseLocalUrl( required string candidate ) {
+		var base = baseUrl();
+		for ( var type in variables.PATHS ) {
+			var prefix = base & variables.PATHS[ type ];
+			if ( candidate.len() > prefix.len() && left( candidate, prefix.len() ) == prefix ) {
+				var name = mid( candidate, prefix.len() + 1, candidate.len() );
+				if ( !name.find( "/" ) ) {
+					return { type : type, name : name };
+				}
+			}
+		}
+		return javacast( "null", "" );
+	}
+
+	/**
+	 * Actor document for a Person or Group, or null when the host doesn't know it.
+	 */
+	function document( required string type, required string name ) {
+		var actor = findActor( type, name );
+		if ( isNull( actor ) ) {
+			return javacast( "null", "" );
+		}
+		var id  = actorUrl( type, actor.name );
+		var doc = [
+			"@context"                  : variables.CONTEXT,
+			"id"                        : id,
+			"type"                      : type,
+			"preferredUsername"         : actor.name,
+			"name"                      : actor.displayName ?: actor.name,
+			"summary"                   : actor.summary ?: "",
+			"url"                       : id,
+			"inbox"                     : id & "/inbox",
+			"outbox"                    : id & "/outbox",
+			"followers"                 : id & "/followers",
+			"endpoints"                 : [ "sharedInbox" : baseUrl() & "/inbox" ],
+			"manuallyApprovesFollowers" : false,
+			"publicKey"                 : [
+				"id"           : id & "##main-key",
+				"owner"        : id,
+				"publicKeyPem" : getKeys( type, actor.id ).publicKeyPem
+			]
+		];
+		if ( len( actor.avatar ?: "" ) ) {
+			doc[ "icon" ] = [ "type" : "Image", "url" : actor.avatar ];
+		}
+		return doc;
+	}
+
+	/**
+	 * The instance actor: signs outbound GETs for servers that require authorized fetch.
+	 * Mastodon's own instance actor uses the domain as preferredUsername.
+	 */
+	struct function instanceDocument() {
+		var id = actorUrl( "Application", "" );
+		return [
+			"@context"                  : variables.CONTEXT,
+			"id"                        : id,
+			"type"                      : "Application",
+			"preferredUsername"         : hostName(),
+			"inbox"                     : baseUrl() & "/inbox",
+			"endpoints"                 : [ "sharedInbox" : baseUrl() & "/inbox" ],
+			"manuallyApprovesFollowers" : true,
+			"publicKey"                 : [
+				"id"           : id & "##main-key",
+				"owner"        : id,
+				"publicKeyPem" : getKeys( "Application", variables.INSTANCE_LOCAL_ID ).publicKeyPem
+			]
+		];
+	}
+
+	/**
+	 * { keyId, privateKeyPem } for signing as the instance actor.
+	 */
+	struct function instanceSigner() {
+		return {
+			keyId         : keyId( "Application", "" ),
+			privateKeyPem : getKeys( "Application", variables.INSTANCE_LOCAL_ID ).privateKeyPem
+		};
+	}
+
+	/**
+	 * { publicKeyPem, privateKeyPem }, generated and stored on first use. INSERT IGNORE
+	 * plus a re-read means two app instances racing on first use agree on one keypair.
+	 */
+	struct function getKeys( required string type, required string localId ) {
+		var cacheKey = type & ":" & localId;
+		if ( variables.keyCache.keyExists( cacheKey ) ) {
+			return variables.keyCache[ cacheKey ];
+		}
+		var existing = readKeys( type, localId );
+		if ( isNull( existing ) ) {
+			var generated = variables.signatures.generateKeyPair();
+			queryExecute(
+				"INSERT IGNORE INTO ApActorKey (ActorType, LocalId, PublicKeyPem, PrivateKeyPem)
+				 VALUES (:type, UUID_TO_BIN(:localId), :pub, :priv)",
+				{
+					type    : { value : type, sqltype : "varchar" },
+					localId : { value : localId, sqltype : "varchar" },
+					pub     : { value : generated.publicKeyPem, sqltype : "longvarchar" },
+					priv    : { value : generated.privateKeyPem, sqltype : "longvarchar" }
+				},
+				{ datasource : variables.datasource }
+			);
+			existing = readKeys( type, localId );
+		}
+		variables.keyCache[ cacheKey ] = existing;
+		return existing;
+	}
+
+	private function readKeys( required string type, required string localId ) {
+		var rows = queryExecute(
+			"SELECT PublicKeyPem, PrivateKeyPem FROM ApActorKey WHERE ActorType = :type AND LocalId = UUID_TO_BIN(:localId)",
+			{
+				type    : { value : type, sqltype : "varchar" },
+				localId : { value : localId, sqltype : "varchar" }
+			},
+			{ datasource : variables.datasource, returntype : "array" }
+		);
+		if ( !rows.len() ) {
+			return javacast( "null", "" );
+		}
+		return { publicKeyPem : rows[ 1 ].PublicKeyPem, privateKeyPem : rows[ 1 ].PrivateKeyPem };
+	}
+
+}
