@@ -9,6 +9,18 @@
 			"custom": "allowPublicKeyRetrieval=true&useSSL=false&allowMultiQueries=true"
 		}
 	},
+	"modules": {
+		"bxactivitypub": {
+			"settings": {
+				"datasource": "bxactivitypub_test",
+				"threadMaxNewPerRun": 25
+			}
+		}
+	},
+	"modulesDirectory": [
+		"${user-dir}/tests/modules",
+		"${boxlang-home}/modules"
+	],
 	"logging": {
 		"logsDirectory": "${user-dir}/tests/logs"
 	}

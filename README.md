@@ -4,7 +4,7 @@ Outbound [ActivityPub](https://www.w3.org/TR/activitypub/) federation for BoxLan
 
 Your app keeps its data; the module handles the protocol: WebFinger, actor documents, HTTP Signatures, the inbox, a delivery queue that survives restarts, and NodeInfo.
 
-**Status: 0.6.1.** Author mode (an account publishing `Article`s) is complete and verified against Mastodon. Posts carry their tags as hashtags. The module counts **likes and boosts** of your posts, and your app can accept **public replies** to them, with their edits and deletions, by implementing an optional second contract, **reply back** to them as the account, and pick up **whole threads**, including replies that never mention you. Everything else inbound is acknowledged and ignored.
+**Status: 0.7.0.** Author mode (an account publishing `Article`s) is complete and verified against Mastodon. Posts carry their tags as hashtags. The module counts **likes and boosts** of your posts, and your app can accept **public replies** to them, with their edits and deletions, by implementing an optional second contract, **reply back** to them as the account, and pick up **whole threads**, including replies that never mention you. Everything else inbound is acknowledged and ignored.
 
 ## Requirements
 
@@ -73,7 +73,7 @@ Implement these too (`implements="bxModules.bxactivitypub.contracts.IHostApp,bxM
 
 #### Whole threads
 
-A reply to someone else's reply only reaches you if it mentions your account. To fill in the rest of the conversation, `fetchThreads()` (scheduled every 30 minutes by the express adapter) reads the `replies` collection of each reply you accepted and fetches the ones you don't have, each from its own server, then passes them to `acceptRemoteReply` under the same rules as delivered replies. It follows threads for posts up to 30 days old, up to 3 levels below a delivered reply, fetching at most 50 new replies per run; a server that fails is skipped and retried later. Settings: `threadMaxPostAgeDays`, `threadMaxDepth`, `threadMaxNewPerRun`, `threadWalkMinutes`.
+A reply to someone else's reply only reaches you if it mentions your account. To fill in the rest of the conversation, `fetchThreads()` (scheduled every 30 minutes by the express adapter) reads the `replies` collection of each reply you accepted and fetches the ones you don't have, each from its own server, then passes them to `acceptRemoteReply` under the same rules as delivered replies. It follows threads for posts up to 30 days old, up to 3 levels below a delivered reply, fetching at most 50 new replies per run; a server that fails is skipped and retried later. See the `thread*` [settings](#settings).
 
 Deletions of fetched replies aren't delivered to you, so when a fetched reply disappears from its parent's collection and its server answers 404 or 410, it is removed through `deleteRemoteReply`. Edits to fetched replies aren't picked up.
 
@@ -136,7 +136,7 @@ class implements="bxModules.bxactivitypub.contracts.IHostApp" {
 ```java
 app  = boxExpress()
 host = new MyHost()
-ap   = new bxModules.bxactivitypub.models.ActivityPub( host = host, settings = { datasource : "mydb" } )
+ap   = new bxModules.bxactivitypub.models.ActivityPub( host = host )
 
 // Routes (WebFinger, actors, inboxes, posts, NodeInfo) and the delivery worker.
 new bxModules.bxactivitypub.adapters.express().mount( app, ap )
@@ -165,6 +165,11 @@ app.listen( 3000 )
 			"port": "3306",
 			"database": "mydb",
 			"username": "root"
+		}
+	},
+	"modules": {
+		"bxactivitypub": {
+			"settings": { "datasource": "mydb" }
 		}
 	},
 	"logging": {
@@ -234,11 +239,26 @@ The express adapter mounts these. Account and post routes answer ActivityPub req
 | GET | `/comment/{id}` | Comments that went out |
 | GET | `/activities/{type}/{uuid}` | Every activity that was sent |
 
-`mount( app, ap, options )` options: `maxInboxBytes` (default 262144), `inboxRateLimit` (inbox POSTs per client IP per minute, default 120; `0` for none), `deliveryIntervalMs` (default 5000; `0` to schedule the delivery worker yourself with `ap.processDeliveries()`), `threadIntervalMs` (default 1800000; `0` to run `ap.fetchThreads()` yourself).
+The adapter's own settings (`maxInboxBytes`, `inboxRateLimit`, `deliveryIntervalMs`, `threadIntervalMs`) are listed under [Settings](#settings); `mount( app, ap, options )` can override them for one mount.
 
 ## Settings
 
-Passed to `new ActivityPub( host, settings )`:
+Every setting has a default in the module's `ModuleConfig.bx`. Override any of them in your app's `boxlang.json`, where `${env.NAME:default}` placeholders work too:
+
+```json
+{
+	"modules": {
+		"bxactivitypub": {
+			"settings": {
+				"datasource": "${env.AP_DATASOURCE:mydb}",
+				"inboxRateLimit": 300
+			}
+		}
+	}
+}
+```
+
+Settings passed in code, `new ActivityPub( host, settings )` or `mount( app, ap, options )`, win over both. `ap.getSettings()` returns the settings in effect.
 
 | Setting | Default | |
 |---|---|---|
@@ -246,8 +266,19 @@ Passed to `new ActivityPub( host, settings )`:
 | `maxAgeSeconds` | `3600` | Oldest signed `Date` accepted on incoming requests |
 | `maxFutureSeconds` | `300` | Furthest-ahead signed `Date` accepted |
 | `httpTimeoutSeconds` | `10` | Outgoing connect and request timeout |
+| `maxResponseBytes` | `1048576` | Largest response read from another server |
 | `userAgent` | `bx-activitypub/{version} (+{baseUrl})` | Outgoing User-Agent |
+| `remoteActorTtlSeconds` | `86400` | How long a fetched remote account (inbox, key) is used before refetching |
+| `remoteActorFailureSeconds` | `300` | How long a remote account that couldn't be fetched isn't tried again |
 | `softwareName`, `softwareVersion` | `bx-activitypub`, module version | Reported in NodeInfo |
+| `threadMaxDepth` | `3` | Levels below a delivered reply that `fetchThreads()` follows |
+| `threadMaxPostAgeDays` | `30` | Posts older than this aren't followed |
+| `threadMaxNewPerRun` | `50` | New replies fetched per `fetchThreads()` run |
+| `threadWalkMinutes` | `30` | How often each reply's replies are re-read |
+| `maxInboxBytes` | `262144` | Largest inbox POST body accepted (express adapter) |
+| `inboxRateLimit` | `120` | Inbox POSTs per client IP per minute; `0` for none (express adapter) |
+| `deliveryIntervalMs` | `5000` | Delivery worker tick; `0` to run `ap.processDeliveries()` yourself (express adapter) |
+| `threadIntervalMs` | `1800000` | Thread fetcher tick; `0` to run `ap.fetchThreads()` yourself (express adapter) |
 
 ## Security
 
@@ -273,7 +304,7 @@ mysql -e "CREATE DATABASE bxactivitypub_test"
 box run-script test
 ```
 
-Tests use the `bxactivitypub_test` database (see `tests/boxlang.json`). `examples/dev-host/` is a small app for trying the module over a tunnel.
+Tests use the `bxactivitypub_test` database and load the module from `tests/modules/` (see `tests/boxlang.json`). `examples/dev-host/` is a small app for trying the module over a tunnel.
 
 ## License
 

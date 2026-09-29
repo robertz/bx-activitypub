@@ -1,0 +1,40 @@
+/**
+ * Settings: ModuleConfig.bx defaults, overridden by boxlang.json (tests/boxlang.json sets
+ * datasource and threadMaxNewPerRun), overridden by what's passed to the facade.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function run() {
+		describe( "Settings", () => {
+
+			it( "takes defaults from ModuleConfig and overrides from boxlang.json", () => {
+				var effective = new models.ActivityPub( host = new tests.helpers.StubHost() ).getSettings();
+				expect( effective.datasource ).toBe( "bxactivitypub_test" );
+				expect( effective.threadMaxNewPerRun ).toBe( 25 );
+				expect( effective.threadMaxDepth ).toBe( 3 );
+				expect( effective.inboxRateLimit ).toBe( 120 );
+				expect( effective.maxAgeSeconds ).toBe( 3600 );
+			} );
+
+			it( "lets settings passed to the facade win over both", () => {
+				var effective = new models.ActivityPub( host = new tests.helpers.StubHost(), settings = { threadMaxNewPerRun : 5, inboxRateLimit : 0 } ).getSettings();
+				expect( effective.threadMaxNewPerRun ).toBe( 5 );
+				expect( effective.inboxRateLimit ).toBe( 0 );
+				expect( effective.datasource ).toBe( "bxactivitypub_test" );
+			} );
+
+			it( "hands out a copy, so callers can't change the settings in effect", () => {
+				var ap = new models.ActivityPub( host = new tests.helpers.StubHost() );
+				ap.getSettings().datasource = "other";
+				expect( ap.getSettings().datasource ).toBe( "bxactivitypub_test" );
+			} );
+
+			it( "still requires a datasource", () => {
+				expect( () => new models.ActivityPub( host = new tests.helpers.StubHost(), settings = { datasource : "" } ) )
+					.toThrow( type = "BxActivityPub.ConfigurationException", regex = "datasource" );
+			} );
+
+		} );
+	}
+
+}

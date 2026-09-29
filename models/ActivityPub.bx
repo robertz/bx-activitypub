@@ -1,45 +1,44 @@
 /**
  * Facade the host app and adapters talk to. Wires the models together.
  *
- *   ap = new bxactivitypub.models.ActivityPub( host = myHost, settings = { datasource : "mydsn" } );
+ *   ap = new bxModules.bxactivitypub.models.ActivityPub( host = myHost );
  *
  * host implements contracts/IHostApp.bx, and optionally contracts/IRemoteReplies.bx to accept
  * replies from the fediverse. isPublic() gates every actor and object lookup,
  * so a non-public actor or post is never served, followed or delivered.
  *
- * settings:
- *   datasource        (required) where the Ap* tables live
- *   maxAgeSeconds     oldest incoming signed Date accepted (default 3600)
- *   maxFutureSeconds  furthest-ahead incoming signed Date accepted (default 300)
- *   httpTimeoutSeconds outbound connect + request timeout (default 10)
- *   userAgent         outbound User-Agent (default "bx-activitypub/{version} (+{baseUrl})")
- *   softwareName      NodeInfo software.name, ^[a-z0-9-]+$ (default "bx-activitypub")
- *   softwareVersion   NodeInfo software.version (default this module's version)
- *   threadMaxDepth       levels below a delivered reply that fetchThreads() follows (default 3)
- *   threadMaxPostAgeDays posts older than this aren't walked (default 30)
- *   threadMaxNewPerRun   new replies fetched per fetchThreads() run (default 50)
- *   threadWalkMinutes    how often each reply's replies are re-read (default 30)
+ * Settings and their defaults are in ModuleConfig.bx; an app overrides them in boxlang.json
+ * (modules.bxactivitypub.settings), and any passed here win over both.
  */
 class {
 
-	variables.VERSION = "0.6.1";
+	variables.VERSION = "0.7.0";
 
-	function init( required host, required struct settings ) {
-		if ( !len( settings.datasource ?: "" ) ) {
-			throw( type = "BxActivityPub.ConfigurationException", message = "settings.datasource is required" );
+	function init( required host, struct settings = {} ) {
+		settings = resolveSettings( settings );
+		variables.settings = settings;
+		if ( !len( settings.datasource ) ) {
+			throw( type = "BxActivityPub.ConfigurationException", message = "the datasource setting is required (boxlang.json: modules.bxactivitypub.settings.datasource)" );
 		}
 		var dsn = settings.datasource;
 
 		variables.host = host;
-		variables.signatures = new Signatures( settings.maxAgeSeconds ?: 3600, settings.maxFutureSeconds ?: 300 );
+		variables.signatures = new Signatures( settings.maxAgeSeconds, settings.maxFutureSeconds );
 		variables.vocab      = new Vocab();
 		variables.actors     = new Actors( host, variables.signatures, dsn );
 		variables.http       = new HttpClient(
 			signatures     = variables.signatures,
-			timeoutSeconds = settings.httpTimeoutSeconds ?: 10,
-			userAgent      = settings.userAgent ?: "bx-activitypub/#variables.VERSION# (+#variables.actors.baseUrl()#)"
+			timeoutSeconds   = settings.httpTimeoutSeconds,
+			maxResponseBytes = settings.maxResponseBytes,
+			userAgent        = len( settings.userAgent ) ? settings.userAgent : "bx-activitypub/#variables.VERSION# (+#variables.actors.baseUrl()#)"
 		);
-		variables.remoteActors = new RemoteActors( variables.http, variables.actors, dsn );
+		variables.remoteActors = new RemoteActors(
+			httpClient        = variables.http,
+			actors            = variables.actors,
+			datasource        = dsn,
+			ttlSeconds        = settings.remoteActorTtlSeconds,
+			failureTtlSeconds = settings.remoteActorFailureSeconds
+		);
 		variables.followers    = new Followers( dsn );
 		variables.activities   = new Activities( variables.actors, dsn );
 		variables.delivery     = new Delivery( variables.http, variables.actors, variables.followers, dsn );
@@ -48,8 +47,8 @@ class {
 			actors          = variables.actors,
 			activities      = variables.activities,
 			datasource      = dsn,
-			softwareName    = settings.softwareName ?: "bx-activitypub",
-			softwareVersion = settings.softwareVersion ?: variables.VERSION
+			softwareName    = settings.softwareName,
+			softwareVersion = len( settings.softwareVersion ) ? settings.softwareVersion : variables.VERSION
 		);
 		variables.remoteObjects = new RemoteObjects( dsn );
 		variables.replies       = new Replies(
@@ -67,10 +66,10 @@ class {
 			httpClient       = variables.http,
 			actors           = variables.actors,
 			vocab            = variables.vocab,
-			maxDepth         = settings.threadMaxDepth ?: 3,
-			maxPostAgeDays   = settings.threadMaxPostAgeDays ?: 30,
-			maxNewPerRun     = settings.threadMaxNewPerRun ?: 50,
-			walkEveryMinutes = settings.threadWalkMinutes ?: 30
+			maxDepth         = settings.threadMaxDepth,
+			maxPostAgeDays   = settings.threadMaxPostAgeDays,
+			maxNewPerRun     = settings.threadMaxNewPerRun,
+			walkEveryMinutes = settings.threadWalkMinutes
 		);
 		variables.reactions     = new Reactions( host = host, actors = variables.actors, vocab = variables.vocab, datasource = dsn );
 		variables.inbox        = new Inbox(
@@ -85,6 +84,14 @@ class {
 			reactions    = variables.reactions
 		);
 		return this;
+	}
+
+	/**
+	 * The settings in effect: ModuleConfig defaults, overridden by boxlang.json, overridden by
+	 * those passed to init(). Adapters read their own settings from here.
+	 */
+	struct function getSettings() {
+		return duplicate( variables.settings );
 	}
 
 	/**
@@ -519,6 +526,18 @@ class {
 			}
 		}
 		return out;
+	}
+
+	private struct function resolveSettings( required struct explicit ) {
+		try {
+			var resolved = duplicate( getModuleInfo( "bxactivitypub" ).settings );
+		} catch ( any e ) {
+			throw(
+				type    = "BxActivityPub.ConfigurationException",
+				message = "bx-activitypub must be installed as a BoxLang module (its settings come from ModuleConfig.bx): #e.message#"
+			);
+		}
+		return resolved.append( explicit, true );
 	}
 
 	/**

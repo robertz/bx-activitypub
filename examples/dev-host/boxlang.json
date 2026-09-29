@@ -9,6 +9,18 @@
 			"custom": "allowPublicKeyRetrieval=true&useSSL=false"
 		}
 	},
+	"modules": {
+		"bxactivitypub": {
+			"settings": {
+				"datasource": "activitypub_dev"
+			}
+		}
+	},
+	"modulesDirectory": [
+		"${user-dir}/boxlang_modules",
+		"${user-dir}/modules",
+		"${boxlang-home}/modules"
+	],
 	"mappings": {
 		"/bxactivitypub": "${user-dir}/../..",
 		"/devhost": "${user-dir}"

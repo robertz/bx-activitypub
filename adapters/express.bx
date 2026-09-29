@@ -12,25 +12,22 @@ class {
 	variables.TYPES           = { "u" : "Person", "c" : "Group" };
 
 	/**
-	 * options:
-	 *   maxInboxBytes       largest inbox POST body accepted (default 262144)
-	 *   inboxRateLimit      inbox POSTs allowed per client IP per minute (default 120; 0 for no
-	 *                       limit). Keyed by req.ip, so behind a proxy set the app's
-	 *                       "trust proxy" (or "trust proxy header") first. Servers retry a 429.
-	 *   deliveryIntervalMs  delivery worker tick (default 5000); 0 disables scheduling
-	 *   threadIntervalMs    thread fetcher tick (default 1800000, 30 minutes); 0 disables it
+	 * Uses the module's settings (see ModuleConfig.bx: maxInboxBytes, inboxRateLimit,
+	 * deliveryIntervalMs, threadIntervalMs); options override them for this mount.
+	 * inboxRateLimit keys on req.ip, so behind a proxy set the app's "trust proxy" (or
+	 * "trust proxy header") first. Servers retry a 429.
 	 */
 	function mount( required app, required ap, struct options = {} ) {
+		var config = ap.getSettings().append( options, true );
 		variables.ap            = ap;
-		variables.maxInboxBytes = options.maxInboxBytes ?: 262144;
+		variables.maxInboxBytes = config.maxInboxBytes;
 
 		app.get( "/.well-known/webfinger", ( req, res ) => webfingerRoute( req, res ) );
 		app.get( "/.well-known/nodeinfo", ( req, res ) => sendNodeInfo( res, variables.ap.nodeInfoLinks(), "application/json" ) );
 		app.get( "/nodeinfo/2.1", ( req, res ) => sendNodeInfo( res, variables.ap.nodeInfoDocument(), 'application/json; profile="http://nodeinfo.diaspora.software/ns/schema/2.1##"' ) );
 		app.get( "/actor", ( req, res ) => sendActivityJson( res, variables.ap.instanceActorDocument() ) );
-		var perMinute = options.inboxRateLimit ?: 120;
-		var limitInbox = perMinute > 0
-			? boxExpressRateLimit( { windowMs : 60000, max : perMinute } )
+		var limitInbox = config.inboxRateLimit > 0
+			? boxExpressRateLimit( { windowMs : 60000, max : config.inboxRateLimit } )
 			: ( req, res, next ) => next();
 		app.post( "/inbox", limitInbox, ( req, res ) => inboxRoute( req, res ) );
 
@@ -45,13 +42,11 @@ class {
 		app.get( "/comment/:id", ( req, res, next ) => objectRoute( req, res, next, "comment" ) );
 		app.get( "/activities/:type/:uuid", ( req, res, next ) => activityRoute( req, res, next ) );
 
-		var intervalMs = options.deliveryIntervalMs ?: 5000;
-		if ( intervalMs > 0 ) {
-			app.schedule( intervalMs, () => variables.ap.processDeliveries(), { name : "activitypub-delivery" } );
+		if ( config.deliveryIntervalMs > 0 ) {
+			app.schedule( config.deliveryIntervalMs, () => variables.ap.processDeliveries(), { name : "activitypub-delivery" } );
 		}
-		var threadIntervalMs = options.threadIntervalMs ?: 30 * 60 * 1000;
-		if ( threadIntervalMs > 0 ) {
-			app.schedule( threadIntervalMs, () => variables.ap.fetchThreads(), { name : "activitypub-threads" } );
+		if ( config.threadIntervalMs > 0 ) {
+			app.schedule( config.threadIntervalMs, () => variables.ap.fetchThreads(), { name : "activitypub-threads" } );
 		}
 		return this;
 	}

@@ -5,5 +5,5 @@
 env     = createObject( "java", "java.lang.System" ).getenv()
 baseUrl = env.get( "PUBLIC_BASE_URL" ) ?: "http://localhost:3000"
 host    = new devhost.DevHost( baseUrl )
-ap      = new bxactivitypub.models.ActivityPub( host = host, settings = { datasource : "activitypub_dev" } )
+ap      = new bxactivitypub.models.ActivityPub( host = host )
 println( jsonSerialize( ap.publishPost( host.postId() ) ) )

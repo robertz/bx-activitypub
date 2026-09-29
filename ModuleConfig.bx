@@ -5,15 +5,59 @@
  */
 class {
 
-	this.version     = "0.6.1";
+	this.version     = "0.7.0";
 	this.mapping     = "bxactivitypub";
 	this.author      = "Robert Zehnder";
 	this.description = "ActivityPub federation for BoxLang apps.";
 	this.webURL      = "https://github.com/robertz/bx-activitypub";
 	this.disabled    = false;
 
+	/**
+	 * Defaults for every setting. Override any of them in the app's boxlang.json:
+	 *
+	 *   "modules" : { "bxactivitypub" : { "settings" : { "datasource" : "mydb" } } }
+	 *
+	 * Settings passed to new ActivityPub( host, settings ) or express().mount( app, ap, options )
+	 * win over both.
+	 */
 	function configure() {
-		settings = {};
+		settings = {
+			// Where the Ap* tables live (required).
+			datasource           : "",
+
+			// Incoming signatures: oldest and furthest-ahead Date accepted.
+			maxAgeSeconds        : 3600,
+			maxFutureSeconds     : 300,
+
+			// Outgoing HTTP: connect + request timeout, largest response read, and User-Agent
+			// ("" = "bx-activitypub/{version} (+{baseUrl})").
+			httpTimeoutSeconds   : 10,
+			maxResponseBytes     : 1048576,
+			userAgent            : "",
+
+			// Remote accounts: how long a fetched actor (inbox, key) is trusted, and how long
+			// a failed fetch of one isn't retried.
+			remoteActorTtlSeconds      : 86400,
+			remoteActorFailureSeconds  : 300,
+
+			// NodeInfo software.name (^[a-z0-9-]+$) and version ("" = this module's version).
+			softwareName         : "bx-activitypub",
+			softwareVersion      : "",
+
+			// Whole threads (fetchThreads()): levels below a delivered reply, oldest post
+			// followed, new replies per run, and how often each reply's replies are re-read.
+			threadMaxDepth       : 3,
+			threadMaxPostAgeDays : 30,
+			threadMaxNewPerRun   : 50,
+			threadWalkMinutes    : 30,
+
+			// Express adapter: largest inbox body, inbox POSTs per client IP per minute (0 =
+			// no limit), and the delivery and thread workers' ticks (0 = schedule them yourself).
+			maxInboxBytes        : 262144,
+			inboxRateLimit       : 120,
+			deliveryIntervalMs   : 5000,
+			threadIntervalMs     : 1800000
+		};
 	}
 
 }
