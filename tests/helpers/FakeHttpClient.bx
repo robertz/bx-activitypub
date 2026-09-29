@@ -34,6 +34,29 @@ class {
 		return { status : planned.status, body : "status #planned.status#", contentType : "text/plain" };
 	}
 
+	/**
+	 * Makes a GET of targetUrl answer with doc (serialized) or with a bare status.
+	 * Unserved URLs answer 404.
+	 */
+	function serve( required string targetUrl, any doc, numeric status = 200 ) {
+		variables.pages = variables.pages ?: createObject( "java", "java.util.concurrent.ConcurrentHashMap" ).init();
+		variables.pages.put( targetUrl, { status : status, body : isNull( doc ) ? "" : jsonSerialize( doc ) } );
+		return this;
+	}
+
+	void function unserve( required string targetUrl ) {
+		variables.pages.remove( targetUrl );
+	}
+
+	struct function signedGet( required string targetUrl, required string keyId, required string privateKeyPem ) {
+		variables.calls.add( targetUrl );
+		var page = isNull( variables.pages ) ? javacast( "null", "" ) : variables.pages.get( targetUrl );
+		if ( isNull( page ) ) {
+			return { status : 404, body : "", contentType : "text/plain" };
+		}
+		return { status : page.status, body : page.body, contentType : "application/activity+json" };
+	}
+
 	numeric function callsTo( required string inboxUrl ) {
 		var count = 0;
 		for ( var called in variables.calls.toArray() ) {

@@ -2,7 +2,10 @@
  * ApRemoteObject persistence: remote objects the host accepted (replies), mapped to the
  * host's id for them.
  *
- * Shape: { objectUrl, actorUrl, postId, hostId }.
+ * Shape: { objectUrl, actorUrl, postId, hostId, parentUrl, repliesUrl, depth, fetched }.
+ *
+ * Walk state (0.6.0, see Threads.bx): a row whose NextWalkAt is due gets its replies
+ * collection read; NULL means it is never walked (too deep, or its post is too old).
  */
 class {
 
@@ -11,17 +14,107 @@ class {
 		return this;
 	}
 
-	void function add( required string objectUrl, required string actorUrl, required string postId, required string hostId ) {
+	/**
+	 * walk: whether the thread walker should read this object's replies (from now on).
+	 */
+	void function add(
+		required string objectUrl,
+		required string actorUrl,
+		required string postId,
+		required string hostId,
+		string parentUrl = "",
+		string repliesUrl = "",
+		numeric depth = 0,
+		boolean fetched = false,
+		boolean walk = true
+	) {
 		queryExecute(
-			"INSERT INTO ApRemoteObject (ObjectUrl, ActorUrl, LocalPostId, HostId) VALUES (:objectUrl, :actorUrl, :postId, :hostId)",
+			"INSERT INTO ApRemoteObject (ObjectUrl, ActorUrl, LocalPostId, HostId, ParentUrl, RepliesUrl, Depth, Fetched, NextWalkAt)
+			 VALUES (:objectUrl, :actorUrl, :postId, :hostId, :parentUrl, :repliesUrl, :depth, :fetched, #walk ? "NOW(3)" : "NULL"#)",
 			{
-				objectUrl : { value : objectUrl, sqltype : "varchar" },
-				actorUrl  : { value : actorUrl, sqltype : "varchar" },
-				postId    : { value : postId, sqltype : "varchar" },
-				hostId    : { value : hostId, sqltype : "varchar" }
+				objectUrl  : { value : objectUrl, sqltype : "varchar" },
+				actorUrl   : { value : actorUrl, sqltype : "varchar" },
+				postId     : { value : postId, sqltype : "varchar" },
+				hostId     : { value : hostId, sqltype : "varchar" },
+				parentUrl  : { value : parentUrl, sqltype : "varchar", null : !len( parentUrl ) },
+				repliesUrl : { value : repliesUrl, sqltype : "varchar", null : !len( repliesUrl ) },
+				depth      : { value : depth, sqltype : "integer" },
+				fetched    : { value : fetched ? 1 : 0, sqltype : "integer" }
 			},
 			{ datasource : variables.datasource }
 		);
+	}
+
+	/**
+	 * Claims up to limit rows due for a walk, leasing them for leaseMinutes so a second app
+	 * instance skips them. Returns the claimed rows.
+	 */
+	array function claimDueWalks( required numeric limit, required numeric leaseMinutes ) {
+		var token = createObject( "java", "java.util.UUID" ).randomUUID().toString();
+		queryExecute(
+			"UPDATE ApRemoteObject SET WalkToken = UUID_TO_BIN(:token), NextWalkAt = NOW(3) + INTERVAL #int( leaseMinutes )# MINUTE
+			 WHERE NextWalkAt <= NOW(3)
+			 ORDER BY NextWalkAt
+			 LIMIT #int( limit )#",
+			{ token : { value : token, sqltype : "varchar" } },
+			{ datasource : variables.datasource }
+		);
+		return select( "WalkToken = UUID_TO_BIN(:token)", { token : { value : token, sqltype : "varchar" } } );
+	}
+
+	/**
+	 * Schedules the next walk minutes from now (resetting failures), or none when minutes is 0.
+	 */
+	void function walked( required string objectUrl, required numeric minutes ) {
+		queryExecute(
+			"UPDATE ApRemoteObject SET WalkToken = NULL, WalkFailures = 0,
+				NextWalkAt = #minutes > 0 ? "NOW(3) + INTERVAL #int( minutes )# MINUTE" : "NULL"#
+			 WHERE ObjectUrl = :objectUrl",
+			{ objectUrl : { value : objectUrl, sqltype : "varchar" } },
+			{ datasource : variables.datasource }
+		);
+	}
+
+	/**
+	 * Gives a claimed row back unwalked (the run ran out of budget): due again at once.
+	 */
+	void function release( required string objectUrl ) {
+		queryExecute(
+			"UPDATE ApRemoteObject SET WalkToken = NULL, NextWalkAt = NOW(3) WHERE ObjectUrl = :objectUrl",
+			{ objectUrl : { value : objectUrl, sqltype : "varchar" } },
+			{ datasource : variables.datasource }
+		);
+	}
+
+	/**
+	 * A failed walk: counts it and retries after minutes.
+	 */
+	void function walkFailed( required string objectUrl, required numeric minutes ) {
+		queryExecute(
+			"UPDATE ApRemoteObject SET WalkToken = NULL, WalkFailures = WalkFailures + 1,
+				NextWalkAt = NOW(3) + INTERVAL #int( minutes )# MINUTE
+			 WHERE ObjectUrl = :objectUrl",
+			{ objectUrl : { value : objectUrl, sqltype : "varchar" } },
+			{ datasource : variables.datasource }
+		);
+	}
+
+	void function setRepliesUrl( required string objectUrl, required string repliesUrl ) {
+		queryExecute(
+			"UPDATE ApRemoteObject SET RepliesUrl = :repliesUrl WHERE ObjectUrl = :objectUrl",
+			{
+				objectUrl  : { value : objectUrl, sqltype : "varchar" },
+				repliesUrl : { value : repliesUrl, sqltype : "varchar" }
+			},
+			{ datasource : variables.datasource }
+		);
+	}
+
+	/**
+	 * Replies to parentUrl that the walker fetched (as opposed to ones delivered to us).
+	 */
+	array function fetchedChildren( required string parentUrl ) {
+		return select( "ParentUrl = :parentUrl AND Fetched = 1", { parentUrl : { value : parentUrl, sqltype : "varchar" } } );
 	}
 
 	function find( required string objectUrl ) {
@@ -63,10 +156,23 @@ class {
 
 	private array function select( required string where, required struct params ) {
 		return queryExecute(
-			"SELECT ObjectUrl, ActorUrl, LocalPostId, HostId FROM ApRemoteObject WHERE #where# ORDER BY CreatedAt",
+			"SELECT ObjectUrl, ActorUrl, LocalPostId, HostId, ParentUrl, RepliesUrl, Depth, WalkFailures, Fetched
+			 FROM ApRemoteObject WHERE #where# ORDER BY CreatedAt",
 			params,
 			{ datasource : variables.datasource, returntype : "array" }
-		).map( ( row ) => { return { objectUrl : row.ObjectUrl, actorUrl : row.ActorUrl, postId : row.LocalPostId, hostId : row.HostId }; } );
+		).map( ( row ) => {
+			return {
+				objectUrl    : row.ObjectUrl,
+				actorUrl     : row.ActorUrl,
+				postId       : row.LocalPostId,
+				hostId       : row.HostId,
+				parentUrl    : row.ParentUrl ?: "",
+				repliesUrl   : row.RepliesUrl ?: "",
+				depth        : row.Depth,
+				walkFailures : row.WalkFailures,
+				fetched      : row.Fetched == 1
+			};
+		} );
 	}
 
 }

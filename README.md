@@ -4,7 +4,7 @@ Outbound [ActivityPub](https://www.w3.org/TR/activitypub/) federation for BoxLan
 
 Your app keeps its data; the module handles the protocol: WebFinger, actor documents, HTTP Signatures, the inbox, a delivery queue that survives restarts, and NodeInfo.
 
-**Status: 0.5.0.** Author mode (an account publishing `Article`s) is complete and verified against Mastodon. Posts carry their tags as hashtags. The module counts **likes and boosts** of your posts, and your app can accept **public replies** to them, with their edits and deletions, by implementing an optional second contract, and **reply back** to them as the account. Everything else inbound is acknowledged and ignored.
+**Status: 0.6.0.** Author mode (an account publishing `Article`s) is complete and verified against Mastodon. Posts carry their tags as hashtags. The module counts **likes and boosts** of your posts, and your app can accept **public replies** to them, with their edits and deletions, by implementing an optional second contract, **reply back** to them as the account, and pick up **whole threads**, including replies that never mention you. Everything else inbound is acknowledged and ignored.
 
 ## Requirements
 
@@ -29,7 +29,7 @@ mysql your_database < boxlang_modules/bx-activitypub/sql/schema.sql
 
 The module adds seven `Ap*` tables and never reads or writes any of yours. Its classes are available as `bxModules.bxactivitypub.*`.
 
-**Upgrading:** from 0.1.x run `sql/upgrade-0.2.0.sql`, then (from anything before 0.4.0) `sql/upgrade-0.4.0.sql`, then (from anything before 0.5.0) `sql/upgrade-0.5.0.sql`, once each.
+**Upgrading:** from 0.1.x run `sql/upgrade-0.2.0.sql`, then (from anything before 0.4.0) `sql/upgrade-0.4.0.sql`, then (from anything before 0.5.0) `sql/upgrade-0.5.0.sql`, then (from anything before 0.6.0) `sql/upgrade-0.6.0.sql`, once each.
 
 ## How it fits together
 
@@ -70,6 +70,12 @@ Implement these too (`implements="bxModules.bxactivitypub.contracts.IHostApp,bxM
 - Replies to replies you accepted arrive with `parentId` set, so threads keep their shape.
 - `sensitive` and `summary` are the author's content warning; `attachmentCount` is how many images or files were attached (they aren't passed on).
 - Moderation is yours: store replies as pending, publish them straight away, or anything in between.
+
+#### Whole threads
+
+A reply to someone else's reply only reaches you if it mentions your account. To fill in the rest of the conversation, `fetchThreads()` (scheduled every 30 minutes by the express adapter) reads the `replies` collection of each reply you accepted and fetches the ones you don't have, each from its own server, then passes them to `acceptRemoteReply` under the same rules as delivered replies. It follows threads for posts up to 30 days old, up to 3 levels below a delivered reply, fetching at most 50 new replies per run; a server that fails is skipped and retried later. Settings: `threadMaxPostAgeDays`, `threadMaxDepth`, `threadMaxNewPerRun`, `threadWalkMinutes`.
+
+Deletions of fetched replies aren't delivered to you, so when a fetched reply disappears from its parent's collection and its server answers 404 or 410, it is removed through `deleteRemoteReply`. Edits to fetched replies aren't picked up.
 
 ## Minimal example
 
@@ -228,7 +234,7 @@ The express adapter mounts these. Account and post routes answer ActivityPub req
 | GET | `/comment/{id}` | Comments that went out |
 | GET | `/activities/{type}/{uuid}` | Every activity that was sent |
 
-`mount( app, ap, options )` options: `maxInboxBytes` (default 262144), `deliveryIntervalMs` (default 5000; `0` to schedule the delivery worker yourself with `ap.processDeliveries()`).
+`mount( app, ap, options )` options: `maxInboxBytes` (default 262144), `deliveryIntervalMs` (default 5000; `0` to schedule the delivery worker yourself with `ap.processDeliveries()`), `threadIntervalMs` (default 1800000; `0` to run `ap.fetchThreads()` yourself).
 
 ## Settings
 

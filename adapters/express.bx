@@ -15,6 +15,7 @@ class {
 	 * options:
 	 *   maxInboxBytes       largest inbox POST body accepted (default 262144)
 	 *   deliveryIntervalMs  delivery worker tick (default 5000); 0 disables scheduling
+	 *   threadIntervalMs    thread fetcher tick (default 1800000, 30 minutes); 0 disables it
 	 */
 	function mount( required app, required ap, struct options = {} ) {
 		variables.ap            = ap;
@@ -40,6 +41,10 @@ class {
 		var intervalMs = options.deliveryIntervalMs ?: 5000;
 		if ( intervalMs > 0 ) {
 			app.schedule( intervalMs, () => variables.ap.processDeliveries(), { name : "activitypub-delivery" } );
+		}
+		var threadIntervalMs = options.threadIntervalMs ?: 30 * 60 * 1000;
+		if ( threadIntervalMs > 0 ) {
+			app.schedule( threadIntervalMs, () => variables.ap.fetchThreads(), { name : "activitypub-threads" } );
 		}
 		return this;
 	}

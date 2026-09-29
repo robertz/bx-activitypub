@@ -1,0 +1,266 @@
+/**
+ * Whole threads: Threads.bx fetches replies further down a thread from `replies`
+ * collections shaped like Mastodon 4.8's (embedded first page of self-replies, then pages of
+ * other accounts' reply ids).
+ */
+class extends="testbox.system.BaseSpec" {
+
+	variables.POST_ID  = "0192a6f0-0000-7000-8000-000000000101";
+	variables.POST_URL = "https://site.example/post/0192a6f0-0000-7000-8000-000000000101";
+	variables.PUBLIC   = "https://www.w3.org/ns/activitystreams##Public";
+	variables.ALICE    = "https://remote.example/users/alice";
+	variables.BOB      = "https://other.example/users/bob";
+	variables.A1       = "https://remote.example/users/alice/statuses/a1";
+	variables.B1       = "https://other.example/users/bob/statuses/b1";
+	variables.B2       = "https://other.example/users/bob/statuses/b2";
+
+	function beforeAll() {
+		variables.db = new tests.helpers.TestDb();
+		db.reset();
+	}
+
+	function run() {
+		describe( "Threads", () => {
+
+			beforeEach( () => {
+				db.rows( "SET FOREIGN_KEY_CHECKS = 0; DELETE FROM ApRemoteObject; DELETE FROM ApRemoteActor; SET FOREIGN_KEY_CHECKS = 1;" );
+				variables.host = new tests.helpers.ReplyHost();
+				variables.http = new tests.helpers.FakeHttpClient();
+				addActor( ALICE, "alice", "remote.example" );
+				addActor( BOB, "bob", "other.example" );
+				// Alice's reply to the post was delivered and accepted as "h-a".
+				objects().add( objectUrl = A1, actorUrl = ALICE, postId = POST_ID, hostId = "h-a", parentUrl = POST_URL, repliesUrl = A1 & "/replies" );
+				serveReplies( A1, [ B1 ] );
+				http.serve( B1, note( B1, BOB, A1 ) );
+				serveReplies( B1, [] );
+			} );
+
+			it( "fetches a reply to an accepted reply and threads it under it", () => {
+				var stats = threads().run();
+				expect( stats ).toBe( { walked : 1, fetched : 1, accepted : 1, removed : 0 } );
+				var call = host.calls().accept[ 1 ];
+				expect( call.postId ).toBe( POST_ID );
+				expect( call.parentId ).toBe( "h-a" );
+				expect( call.reply.objectUrl ).toBe( B1 );
+				expect( call.reply.author.handle ).toBe( "@bob@other.example" );
+				var fetched = objects().find( B1 );
+				expect( fetched.parentUrl ).toBe( A1 );
+				expect( fetched.depth ).toBe( 1 );
+				expect( fetched.fetched ).toBeTrue();
+				expect( fetched.repliesUrl ).toBe( B1 & "/replies" );
+			} );
+
+			it( "doesn't fetch a reply it already has, and waits before walking again", () => {
+				threads().run();
+				threads().run();
+				expect( http.callsTo( A1 & "/replies" ) ).toBe( 1 );
+				makeDue();
+				var again = threads().run();
+				expect( again.fetched ).toBe( 0 );
+				expect( http.callsTo( B1 ) ).toBe( 1 );
+				expect( host.calls().accept.len() ).toBe( 1 );
+			} );
+
+			it( "follows replies down to maxDepth and no further", () => {
+				var runner = threads( maxDepth = 1 );
+				runner.run();
+				expect( walkScheduled( B1 ) ).toBeFalse();
+				expect( walkScheduled( A1 ) ).toBeTrue();
+			} );
+
+			it( "never accepts a non-public reply", () => {
+				var followersOnly = note( B1, BOB, A1 );
+				followersOnly.to = [ BOB & "/followers" ];
+				followersOnly.cc = [];
+				http.serve( B1, followersOnly );
+				expect( threads().run().accepted ).toBe( 0 );
+				expect( host.calls().accept ).toBeEmpty();
+			} );
+
+			it( "refuses a reply whose id, author or parent doesn't check out", () => {
+				var elsewhere = note( B1, BOB, A1 );
+				elsewhere.id = "https://evil.example/notes/1";
+				http.serve( B1, elsewhere );
+				threads().run();
+
+				var stolenAuthor = note( B1, ALICE, A1 );
+				http.serve( B1, stolenAuthor );
+				makeDue();
+				threads().run();
+
+				var otherParent = note( B1, BOB, "https://remote.example/users/alice/statuses/other" );
+				http.serve( B1, otherParent );
+				makeDue();
+				threads().run();
+
+				expect( host.calls().accept ).toBeEmpty();
+				expect( isNull( objects().find( B1 ) ) ).toBeTrue();
+			} );
+
+			it( "fetches at most maxNewPerRun replies per run and finishes on the next", () => {
+				serveReplies( A1, [ B1, B2 ] );
+				http.serve( B2, note( B2, BOB, A1 ) );
+				var runner = threads( maxNewPerRun = 1 );
+				expect( runner.run().fetched ).toBe( 1 );
+				expect( runner.run().fetched ).toBe( 1 );
+				expect( host.calls().accept.len() ).toBe( 2 );
+			} );
+
+			it( "stops walking a post older than maxPostAgeDays", () => {
+				var post = duplicate( host.getObject( "post", POST_ID ) );
+				post.published = dateAdd( "d", -31, now() );
+				host.putPost( POST_ID, post );
+				expect( threads().run().walked ).toBe( 0 );
+				expect( http.callsTo( A1 & "/replies" ) ).toBe( 0 );
+				expect( walkScheduled( A1 ) ).toBeFalse();
+			} );
+
+			it( "removes a fetched reply that vanished from the collection and is gone", () => {
+				serveReplies( A1, [ B1, B2 ] );
+				http.serve( B2, note( B2, BOB, A1 ) );
+				threads().run();
+				serveReplies( A1, [] );
+				http.serve( B1, javacast( "null", "" ), 410 );
+				makeDue();
+				var stats = threads().run();
+				expect( stats.removed ).toBe( 1 );
+				expect( host.calls().delete ).toBe( [ "comment-1" ] );
+				expect( isNull( objects().find( B1 ) ) ).toBeTrue();
+				// B2 is missing from the listing too, but its server still has it.
+				expect( isNull( objects().find( B2 ) ) ).toBeFalse();
+			} );
+
+			it( "never removes delivered replies because a collection doesn't list them", () => {
+				objects().add( objectUrl = B2, actorUrl = BOB, postId = POST_ID, hostId = "h-b2", parentUrl = A1 );
+				http.serve( B2, javacast( "null", "" ), 410 );
+				threads().run();
+				expect( isNull( objects().find( B2 ) ) ).toBeFalse();
+			} );
+
+			it( "backs off a failing server and skips its other threads in the same run", () => {
+				var a2 = "https://remote.example/users/alice/statuses/a2";
+				objects().add( objectUrl = a2, actorUrl = ALICE, postId = POST_ID, hostId = "h-a2", parentUrl = POST_URL, repliesUrl = a2 & "/replies" );
+				serveReplies( a2, [] );
+				http.serve( A1 & "/replies", javacast( "null", "" ), 500 );
+				http.serve( a2 & "/replies", javacast( "null", "" ), 500 );
+				var stats = threads().run();
+				expect( stats.walked ).toBe( 0 );
+				expect( http.callsTo( A1 & "/replies" ) + http.callsTo( a2 & "/replies" ) ).toBe( 1 );
+				var failures = db.rows( "SELECT WalkFailures, NextWalkAt > NOW(3) + INTERVAL 20 MINUTE AS Later FROM ApRemoteObject WHERE ObjectUrl IN (:a1, :a2)", { a1 : A1, a2 : a2 } );
+				expect( failures.map( ( row ) => row.WalkFailures ) ).toBe( [ 1, 1 ] );
+				expect( failures.map( ( row ) => row.Later ) ).toBe( [ 1, 1 ] );
+			} );
+
+			it( "treats a replies page on another server as a failure", () => {
+				http.serve( A1 & "/replies", {
+					id    : A1 & "/replies",
+					type  : "Collection",
+					first : "https://evil.example/replies"
+				} );
+				expect( threads().run().walked ).toBe( 0 );
+				expect( http.callsTo( "https://evil.example/replies" ) ).toBe( 0 );
+			} );
+
+			it( "learns the replies URL of a reply delivered before 0.6.0 from the reply itself", () => {
+				db.rows( "UPDATE ApRemoteObject SET RepliesUrl = NULL" );
+				http.serve( A1, note( A1, ALICE, POST_URL ) );
+				expect( threads().run().accepted ).toBe( 1 );
+				expect( objects().find( A1 ).repliesUrl ).toBe( A1 & "/replies" );
+			} );
+
+			it( "does nothing for a host that doesn't take replies", () => {
+				expect( build( new tests.helpers.StubHost() ).run() ).toBe( { walked : 0, fetched : 0, accepted : 0, removed : 0 } );
+			} );
+
+		} );
+	}
+
+	// ---- helpers -------------------------------------------------------------
+
+	private function threads( numeric maxDepth = 3, numeric maxNewPerRun = 50 ) {
+		return build( host, maxDepth, maxNewPerRun );
+	}
+
+	private function build( required host, numeric maxDepth = 3, numeric maxNewPerRun = 50 ) {
+		var sigs    = new models.Signatures();
+		var actors  = new models.Actors( host, sigs, db.dsn() );
+		var vocab   = new models.Vocab();
+		var replies = new models.Replies(
+			host          = host,
+			actors        = actors,
+			remoteObjects = objects(),
+			remoteActors  = new models.RemoteActors( http, actors, db.dsn() ),
+			followers     = new models.Followers( db.dsn() ),
+			vocab         = vocab
+		);
+		return new models.Threads(
+			host          = host,
+			replies       = replies,
+			remoteObjects = objects(),
+			httpClient    = http,
+			actors        = actors,
+			vocab         = vocab,
+			maxDepth      = maxDepth,
+			maxNewPerRun  = maxNewPerRun
+		);
+	}
+
+	private function objects() {
+		return new models.RemoteObjects( db.dsn() );
+	}
+
+	/**
+	 * A replies collection shaped like Mastodon's: an empty embedded first page (no
+	 * self-replies) pointing at a page of other accounts' reply ids.
+	 */
+	private void function serveReplies( required string noteUrl, required array ids ) {
+		var others = noteUrl & "/replies?only_other_accounts=true&page=true";
+		http.serve( noteUrl & "/replies", {
+			id    : noteUrl & "/replies",
+			type  : "Collection",
+			first : { type : "CollectionPage", next : others, partOf : noteUrl & "/replies", items : [] }
+		} );
+		http.serve( others, { id : others, type : "CollectionPage", partOf : noteUrl & "/replies", items : ids } );
+	}
+
+	private struct function note( required string id, required string author, required string inReplyTo ) {
+		return {
+			"@context"   : "https://www.w3.org/ns/activitystreams",
+			id           : id,
+			type         : "Note",
+			attributedTo : author,
+			inReplyTo    : inReplyTo,
+			to           : [ PUBLIC ],
+			cc           : [ author & "/followers" ],
+			content      : "<p>reply</p>",
+			published    : "2026-09-28T18:00:00Z",
+			url          : id,
+			replies      : { id : id & "/replies", type : "Collection" }
+		};
+	}
+
+	private void function addActor( required string actorUrl, required string name, required string domain ) {
+		db.rows(
+			"INSERT INTO ApRemoteActor (ActorUrl, InboxUrl, SharedInboxUrl, PublicKeyId, PublicKeyPem, Name, Handle, ProfileUrl, FetchedAt)
+			 VALUES (:actor, :inbox, :shared, :keyId, 'p', :name, :handle, :profile, NOW(3))",
+			{
+				actor   : actorUrl,
+				inbox   : actorUrl & "/inbox",
+				shared  : "https://#domain#/inbox",
+				keyId   : actorUrl & "##main-key",
+				name    : name,
+				handle  : "@#name#@#domain#",
+				profile : "https://#domain#/@#name#"
+			}
+		);
+	}
+
+	private void function makeDue() {
+		db.rows( "UPDATE ApRemoteObject SET NextWalkAt = NOW(3) WHERE NextWalkAt IS NOT NULL" );
+	}
+
+	private boolean function walkScheduled( required string objectUrl ) {
+		return db.rows( "SELECT NextWalkAt FROM ApRemoteObject WHERE ObjectUrl = :url AND NextWalkAt IS NOT NULL", { url : objectUrl } ).len() > 0;
+	}
+
+}

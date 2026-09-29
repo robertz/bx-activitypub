@@ -1,0 +1,274 @@
+/**
+ * Whole threads: fetches replies further down fediverse threads that were never delivered
+ * to us (a reply to someone else's reply only reaches us if it mentions the local account).
+ *
+ * Each run claims accepted remote replies that are due (ApRemoteObject.NextWalkAt), reads
+ * each one's `replies` collection, and fetches every reply it doesn't know yet from that
+ * reply's own id; embedded copies are never trusted. A fetched reply is accepted under the
+ * same rules as a delivered one (Replies.acceptFetched()). Bounds: posts up to
+ * maxPostAgeDays old, maxDepth levels below a delivered reply, maxNewPerRun new fetches per
+ * run, and a failing server is skipped for the rest of the run and backed off.
+ *
+ * Mastodon 4.8 (verified 2026-09-28): `replies` is a Collection whose embedded `first` page
+ * holds the author's own self-replies and whose `next` pages list other accounts' replies
+ * as bare ids, 60 per page, oldest first.
+ *
+ * Edits and deletions of a fetched reply aren't delivered to us. Deletions are caught here:
+ * once a collection has been read to the end, a fetched reply missing from it is re-fetched
+ * and removed if its server answers 404 or 410. Edits are not tracked.
+ */
+class {
+
+	variables.BACKOFF_MINUTES = [ 30, 120, 720 ];
+	variables.LEASE_MINUTES   = 10;
+	variables.MAX_PAGES       = 5;
+
+	function init(
+		required host,
+		required replies,
+		required remoteObjects,
+		required httpClient,
+		required actors,
+		required vocab,
+		numeric maxDepth = 3,
+		numeric maxPostAgeDays = 30,
+		numeric maxNewPerRun = 50,
+		numeric walkEveryMinutes = 30
+	) {
+		variables.host             = arguments.host;
+		variables.replies          = arguments.replies;
+		variables.remoteObjects    = arguments.remoteObjects;
+		variables.http             = arguments.httpClient;
+		variables.actors           = arguments.actors;
+		variables.vocab            = arguments.vocab;
+		variables.maxDepth         = arguments.maxDepth;
+		variables.maxPostAgeDays   = arguments.maxPostAgeDays;
+		variables.maxNewPerRun     = arguments.maxNewPerRun;
+		variables.walkEveryMinutes = arguments.walkEveryMinutes;
+		return this;
+	}
+
+	/**
+	 * One run. Returns { walked, fetched, accepted, removed }.
+	 */
+	struct function run() {
+		var stats = { walked : 0, fetched : 0, accepted : 0, removed : 0 };
+		if ( !variables.replies.enabled() ) {
+			return stats;
+		}
+		var failedHosts = {};
+		for ( var parent in variables.remoteObjects.claimDueWalks( 100, variables.LEASE_MINUTES ) ) {
+			if ( stats.fetched >= variables.maxNewPerRun ) {
+				variables.remoteObjects.release( parent.objectUrl );
+				continue;
+			}
+			if ( !postInWindow( parent.postId ) ) {
+				variables.remoteObjects.walked( parent.objectUrl, 0 );
+				continue;
+			}
+			var serverName = hostOf( parent.objectUrl );
+			if ( failedHosts.keyExists( serverName ) ) {
+				variables.remoteObjects.walkFailed( parent.objectUrl, backoffMinutes( parent.walkFailures ) );
+				continue;
+			}
+			try {
+				var outcome = walk( parent, variables.maxNewPerRun - stats.fetched );
+				stats.walked++;
+				stats.fetched  += outcome.fetched;
+				stats.accepted += outcome.accepted;
+				stats.removed  += outcome.removed;
+				if ( outcome.stop ) {
+					variables.remoteObjects.walked( parent.objectUrl, 0 );
+				} else if ( outcome.complete ) {
+					// A little under the interval, so the next scheduled run finds it due.
+					variables.remoteObjects.walked( parent.objectUrl, max( variables.walkEveryMinutes - 5, 1 ) );
+				} else {
+					variables.remoteObjects.release( parent.objectUrl );
+				}
+			} catch ( any e ) {
+				failedHosts[ serverName ] = true;
+				variables.remoteObjects.walkFailed( parent.objectUrl, backoffMinutes( parent.walkFailures ) );
+				writeLog( text = "thread walk of #parent.objectUrl# failed: #e.message#", type = "warning", log = "activitypub" );
+			}
+		}
+		if ( stats.fetched + stats.removed > 0 ) {
+			writeLog( text = "threads: walked #stats.walked#, fetched #stats.fetched#, accepted #stats.accepted#, removed #stats.removed#", type = "information", log = "activitypub" );
+		}
+		return stats;
+	}
+
+	// ---- private -------------------------------------------------------------
+
+	/**
+	 * Reads parent's replies collection and fetches up to budget unknown replies.
+	 * Returns { fetched, accepted, removed, complete (every reply listed was handled), stop
+	 * (never walk this one again) }. Throws when parent's own server fails.
+	 */
+	private struct function walk( required struct parent, required numeric budget ) {
+		var out = { fetched : 0, accepted : 0, removed : 0, complete : false, stop : false };
+
+		var repliesUrl = parent.repliesUrl;
+		if ( !len( repliesUrl ) ) {
+			var response = get( parent.objectUrl );
+			if ( response.status == 404 || response.status == 410 ) {
+				if ( parent.fetched ) {
+					variables.replies.removeFetched( parent );
+					out.removed++;
+				}
+				out.stop = true;
+				return out;
+			}
+			repliesUrl = variables.replies.repliesUrlOf( parseOk( parent.objectUrl, response ) );
+			if ( !len( repliesUrl ) || hostOf( repliesUrl ) != hostOf( parent.objectUrl ) ) {
+				out.stop = true;
+				return out;
+			}
+			variables.remoteObjects.setRepliesUrl( parent.objectUrl, repliesUrl );
+		}
+
+		var listing = listReplies( repliesUrl, hostOf( parent.objectUrl ) );
+		for ( var replyUrl in listing.ids ) {
+			if ( !isNull( variables.remoteObjects.find( replyUrl ) ) ) {
+				continue;
+			}
+			if ( out.fetched >= budget ) {
+				return out;
+			}
+			out.fetched++;
+			try {
+				var doc = fetchReply( replyUrl, parent.objectUrl );
+				if ( !isNull( doc ) && variables.replies.acceptFetched( doc, parent, variables.maxDepth ).reason == "accepted reply" ) {
+					out.accepted++;
+				}
+			} catch ( any e ) {
+				writeLog( text = "could not fetch reply #replyUrl#: #e.message#", type = "warning", log = "activitypub" );
+			}
+		}
+		out.complete = listing.complete;
+		if ( listing.complete ) {
+			out.removed += removeVanished( parent, listing.ids );
+		}
+		return out;
+	}
+
+	/**
+	 * Every id in a replies collection: { ids, complete (all pages read) }. Pages must be on
+	 * the parent's own server.
+	 */
+	private struct function listReplies( required string repliesUrl, required string serverName ) {
+		var ids        = [];
+		var collection = parseOk( repliesUrl, get( repliesUrl ) );
+		appendItems( ids, collection );
+		var page  = collection.first ?: "";
+		var pages = 0;
+		while ( true ) {
+			if ( isSimpleValue( page ) ) {
+				if ( !len( page ) ) {
+					return { ids : ids, complete : true };
+				}
+				if ( hostOf( page ) != serverName ) {
+					throw( type = "BxActivityPub.RemoteFetchFailed", message = "replies page #page# is not on #serverName#" );
+				}
+				if ( ++pages > variables.MAX_PAGES ) {
+					return { ids : ids, complete : false };
+				}
+				page = parseOk( page, get( page ) );
+			}
+			if ( !isStruct( page ) ) {
+				return { ids : ids, complete : true };
+			}
+			appendItems( ids, page );
+			page = variables.vocab.idOf( page.next ?: "" );
+		}
+	}
+
+	private void function appendItems( required array ids, required struct page ) {
+		for ( var field in [ "items", "orderedItems" ] ) {
+			var items = page[ field ] ?: [];
+			for ( var item in isArray( items ) ? items : [ items ] ) {
+				var id = variables.vocab.idOf( item );
+				if ( len( id ) && !ids.find( id ) ) {
+					ids.append( id );
+				}
+			}
+		}
+	}
+
+	/**
+	 * The reply from its own id, or null when it isn't a Note by an account on the server it
+	 * came from, answering parentUrl.
+	 */
+	private function fetchReply( required string replyUrl, required string parentUrl ) {
+		var doc = parseOk( replyUrl, get( replyUrl ) );
+		var id  = variables.vocab.idOf( doc.id ?: "" );
+		if ( compare( id, replyUrl ) != 0
+			|| ( doc.type ?: "" ) != "Note"
+			|| hostOf( variables.vocab.idOf( doc.attributedTo ?: "" ) ) != hostOf( id )
+			|| compare( variables.vocab.idOf( doc.inReplyTo ?: "" ), parentUrl ) != 0 ) {
+			writeLog( text = "ignored fetched #replyUrl#: not a Note from its own server answering #parentUrl#", type = "information", log = "activitypub" );
+			return javacast( "null", "" );
+		}
+		return doc;
+	}
+
+	/**
+	 * Fetched replies to parent that its collection no longer lists and whose server says
+	 * are gone. Returns how many were removed.
+	 */
+	private numeric function removeVanished( required struct parent, required array listedIds ) {
+		var removed = 0;
+		for ( var child in variables.remoteObjects.fetchedChildren( parent.objectUrl ) ) {
+			if ( listedIds.find( child.objectUrl ) ) {
+				continue;
+			}
+			try {
+				var status = get( child.objectUrl ).status;
+				if ( status == 404 || status == 410 ) {
+					variables.replies.removeFetched( child );
+					removed++;
+				}
+			} catch ( any e ) {
+				writeLog( text = "could not recheck #child.objectUrl#: #e.message#", type = "warning", log = "activitypub" );
+			}
+		}
+		return removed;
+	}
+
+	private boolean function postInWindow( required string postId ) {
+		var post = variables.host.getObject( "post", postId );
+		return !isNull( post ) && isDate( post.published ?: "" ) && dateDiff( "d", post.published, now() ) <= variables.maxPostAgeDays;
+	}
+
+	private numeric function backoffMinutes( required numeric failures ) {
+		return variables.BACKOFF_MINUTES[ min( failures + 1, variables.BACKOFF_MINUTES.len() ) ];
+	}
+
+	private struct function get( required string targetUrl ) {
+		var signer = variables.actors.instanceSigner();
+		return variables.http.signedGet( targetUrl, signer.keyId, signer.privateKeyPem );
+	}
+
+	private struct function parseOk( required string targetUrl, required struct response ) {
+		if ( response.status < 200 || response.status > 299 ) {
+			throw( type = "BxActivityPub.RemoteFetchFailed", message = "GET #targetUrl# returned #response.status#" );
+		}
+		try {
+			var doc = jsonDeserialize( response.body );
+		} catch ( any e ) {
+			throw( type = "BxActivityPub.RemoteFetchFailed", message = "GET #targetUrl# did not return JSON" );
+		}
+		if ( !isStruct( doc ) ) {
+			throw( type = "BxActivityPub.RemoteFetchFailed", message = "GET #targetUrl# did not return an object" );
+		}
+		return doc;
+	}
+
+	private string function hostOf( required string candidate ) {
+		try {
+			return lCase( createObject( "java", "java.net.URI" ).create( candidate ).getHost() ?: "" );
+		} catch ( any e ) {
+			return "";
+		}
+	}
+
+}

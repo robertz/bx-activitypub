@@ -97,6 +97,61 @@ class {
 		return out;
 	}
 
+	/**
+	 * A reply the thread walker fetched from its own id (so it is the author's, the way a
+	 * signature proves it for a delivered one) under parent, an accepted remote object.
+	 * Same rules as a delivered reply: public only, on a public post, host moderation.
+	 * Its own replies are walked while it is less than maxDepth below the delivered reply.
+	 * Returns { status, reason }.
+	 */
+	struct function acceptFetched( required struct obj, required struct parent, required numeric maxDepth ) {
+		var objectUrl = variables.vocab.idOf( obj.id ?: "" );
+		if ( !isNull( variables.remoteObjects.find( objectUrl ) ) ) {
+			return result( 202, "reply already accepted" );
+		}
+		if ( !isPubliclyAddressed( obj, obj ) ) {
+			return result( 202, "ignored non-public reply" );
+		}
+		if ( isNull( variables.host.getObject( "post", parent.postId ) ) || !variables.host.isPublic( "post", parent.postId ) ) {
+			return result( 202, "ignored reply to a non-public post" );
+		}
+		var remote = variables.remoteActors.lookup( variables.vocab.idOf( obj.attributedTo ?: "" ) );
+		var hostId = variables.host.acceptRemoteReply( parent.postId, parent.hostId, buildReply( obj, remote ) );
+		if ( isNull( hostId ) || !len( hostId ) ) {
+			return result( 202, "host refused reply" );
+		}
+		var depth = parent.depth + 1;
+		variables.remoteObjects.add(
+			objectUrl  = objectUrl,
+			actorUrl   = remote.actorUrl,
+			postId     = parent.postId,
+			hostId     = hostId,
+			parentUrl  = parent.objectUrl,
+			repliesUrl = repliesUrlOf( obj ),
+			depth      = depth,
+			fetched    = true,
+			walk       = depth < maxDepth
+		);
+		writeLog( text = "accepted fetched reply #objectUrl# from #remote.actorUrl# under #parent.objectUrl# as #hostId#", type = "information", log = "activitypub" );
+		return result( 202, "accepted reply" );
+	}
+
+	/**
+	 * A reply the walker fetched is gone from its server: removed like a delivered Delete.
+	 */
+	void function removeFetched( required struct known ) {
+		variables.host.deleteRemoteReply( known.hostId );
+		variables.remoteObjects.remove( known.objectUrl );
+		writeLog( text = "fetched reply #known.objectUrl# is gone; deleted #known.hostId#", type = "information", log = "activitypub" );
+	}
+
+	/**
+	 * The URL of a Note's replies collection, or "".
+	 */
+	string function repliesUrlOf( required struct obj ) {
+		return variables.vocab.idOf( obj.replies ?: "" );
+	}
+
 	// ---- handlers ------------------------------------------------------------
 
 	private struct function handleCreate( required struct activity, required struct remote ) {
@@ -142,7 +197,14 @@ class {
 		if ( isNull( hostId ) || !len( hostId ) ) {
 			return result( 202, "host refused reply" );
 		}
-		variables.remoteObjects.add( objectUrl, remote.actorUrl, postId, hostId );
+		variables.remoteObjects.add(
+			objectUrl  = objectUrl,
+			actorUrl   = remote.actorUrl,
+			postId     = postId,
+			hostId     = hostId,
+			parentUrl  = target,
+			repliesUrl = repliesUrlOf( obj )
+		);
 		writeLog( text = "accepted reply #objectUrl# from #remote.actorUrl# on post #postId# as #hostId#", type = "information", log = "activitypub" );
 		return result( 202, "accepted reply" );
 	}

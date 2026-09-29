@@ -15,10 +15,14 @@
  *   userAgent         outbound User-Agent (default "bx-activitypub/{version} (+{baseUrl})")
  *   softwareName      NodeInfo software.name, ^[a-z0-9-]+$ (default "bx-activitypub")
  *   softwareVersion   NodeInfo software.version (default this module's version)
+ *   threadMaxDepth       levels below a delivered reply that fetchThreads() follows (default 3)
+ *   threadMaxPostAgeDays posts older than this aren't walked (default 30)
+ *   threadMaxNewPerRun   new replies fetched per fetchThreads() run (default 50)
+ *   threadWalkMinutes    how often each reply's replies are re-read (default 30)
  */
 class {
 
-	variables.VERSION = "0.5.0";
+	variables.VERSION = "0.6.0";
 
 	function init( required host, required struct settings ) {
 		if ( !len( settings.datasource ?: "" ) ) {
@@ -55,6 +59,18 @@ class {
 			remoteActors  = variables.remoteActors,
 			followers     = variables.followers,
 			vocab         = variables.vocab
+		);
+		variables.threads       = new Threads(
+			host             = host,
+			replies          = variables.replies,
+			remoteObjects    = variables.remoteObjects,
+			httpClient       = variables.http,
+			actors           = variables.actors,
+			vocab            = variables.vocab,
+			maxDepth         = settings.threadMaxDepth ?: 3,
+			maxPostAgeDays   = settings.threadMaxPostAgeDays ?: 30,
+			maxNewPerRun     = settings.threadMaxNewPerRun ?: 50,
+			walkEveryMinutes = settings.threadWalkMinutes ?: 30
 		);
 		variables.reactions     = new Reactions( host = host, actors = variables.actors, vocab = variables.vocab, datasource = dsn );
 		variables.inbox        = new Inbox(
@@ -299,6 +315,15 @@ class {
 
 	numeric function processDeliveries( numeric batchSize = 20 ) {
 		return variables.delivery.runOnce( batchSize );
+	}
+
+	/**
+	 * Whole threads: fetches replies further down fediverse threads that weren't delivered
+	 * (see Threads.bx). Does nothing for a host without IRemoteReplies.
+	 * Returns { walked, fetched, accepted, removed }.
+	 */
+	struct function fetchThreads() {
+		return variables.threads.run();
 	}
 
 	/**
