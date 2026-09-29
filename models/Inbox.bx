@@ -37,7 +37,6 @@ class {
 	 */
 	struct function handle( required string method, required string path, required struct headers, required any body ) {
 		var bodyText = isBinary( body ) ? createObject( "java", "java.lang.String" ).init( body, "UTF-8" ) : body;
-		writeLog( text = "<-- inbox #method# #path# headers=#jsonSerialize( headers )# body=#bodyText#", type = "debug", log = "activitypub" );
 
 		try {
 			var activity = jsonDeserialize( bodyText );
@@ -47,6 +46,13 @@ class {
 		if ( !isStruct( activity ) || !isSimpleValue( activity.type ?: "" ) ) {
 			return result( 400, "body is not an activity" );
 		}
+		// Never the body: it can be a followers-only reply or a direct message, which are
+		// dropped rather than stored and shouldn't end up in logs either.
+		writeLog(
+			text = "<-- inbox #method# #path# #activity.type# #variables.vocab.idOf( activity.id ?: '' )# from #variables.vocab.idOf( activity.actor ?: '' )#",
+			type = "debug",
+			log  = "activitypub"
+		);
 		var destination = route( activity );
 		if ( !len( destination ) ) {
 			return result( 202, "ignored #activity.type ?: 'untyped'#" );
@@ -54,7 +60,7 @@ class {
 
 		var verified = verify( method, path, headers, body, activity, activity.type == "Delete" );
 		if ( !verified.valid ) {
-			writeLog( text = "inbox rejected #activity.type# from #variables.vocab.idOf( activity.actor ?: '' )#: #verified.reason#", type = "warning", log = "activitypub" );
+			writeLog( text = "inbox rejected #activity.type# from #variables.vocab.idOf( activity.actor ?: '' )#: #verified.reason# #verified.detail ?: ''#", type = "warning", log = "activitypub" );
 			return result( 401, verified.reason );
 		}
 
@@ -196,7 +202,7 @@ class {
 			}
 		}
 		if ( !check.valid ) {
-			return { valid : false, reason : check.reason };
+			return { valid : false, reason : check.reason, detail : check.detail ?: "" };
 		}
 
 		var claimedActor = variables.vocab.idOf( activity.actor ?: "" );

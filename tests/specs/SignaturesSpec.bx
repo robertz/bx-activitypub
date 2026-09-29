@@ -52,6 +52,23 @@ class extends="testbox.system.BaseSpec" {
 				expect( result.reason ).toInclude( "signature mismatch" );
 			} );
 
+			it( "keeps the signing string out of the reason (it goes back to the caller)", () => {
+				var result = verify( signedHeaders(), body, other.publicKeyPem );
+				expect( result.reason ).toBe( "signature mismatch" );
+				expect( result.detail ).toInclude( "(request-target): post /c/general/inbox" );
+			} );
+
+			it( "compares the Digest case-sensitively", () => {
+				var headers    = signedHeaders();
+				var real       = sigs.digest( body );
+				var flipped    = "SHA-256=" & reReplace( mid( real, 9, len( real ) ), "([a-z])", "\U\1", "one" );
+				expect( compare( flipped, real ) ).notToBe( 0 );
+				headers.digest = flipped;
+				var result     = verify( headers );
+				expect( result.valid ).toBeFalse();
+				expect( result.reason ).toInclude( "Digest does not match" );
+			} );
+
 			it( "fails on a stale Date", () => {
 				var result = verify( signedHeaders( at = now - 3601 ) );
 				expect( result.valid ).toBeFalse();

@@ -94,7 +94,7 @@ class extends="testbox.system.BaseSpec" {
 			it( "rejects a Follow signed with the wrong key", () => {
 				var outcome = post( follow(), true, "/c/general/inbox", otherKeys.privateKeyPem );
 				expect( outcome.status ).toBe( 401 );
-				expect( outcome.reason ).toInclude( "signature mismatch" );
+				expect( outcome.reason ).toBe( "signature mismatch" );
 				expect( delivery.$count( "enqueue" ) ).toBe( 0 );
 			} );
 

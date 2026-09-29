@@ -4,7 +4,7 @@ Outbound [ActivityPub](https://www.w3.org/TR/activitypub/) federation for BoxLan
 
 Your app keeps its data; the module handles the protocol: WebFinger, actor documents, HTTP Signatures, the inbox, a delivery queue that survives restarts, and NodeInfo.
 
-**Status: 0.6.0.** Author mode (an account publishing `Article`s) is complete and verified against Mastodon. Posts carry their tags as hashtags. The module counts **likes and boosts** of your posts, and your app can accept **public replies** to them, with their edits and deletions, by implementing an optional second contract, **reply back** to them as the account, and pick up **whole threads**, including replies that never mention you. Everything else inbound is acknowledged and ignored.
+**Status: 0.6.1.** Author mode (an account publishing `Article`s) is complete and verified against Mastodon. Posts carry their tags as hashtags. The module counts **likes and boosts** of your posts, and your app can accept **public replies** to them, with their edits and deletions, by implementing an optional second contract, **reply back** to them as the account, and pick up **whole threads**, including replies that never mention you. Everything else inbound is acknowledged and ignored.
 
 ## Requirements
 
@@ -234,7 +234,7 @@ The express adapter mounts these. Account and post routes answer ActivityPub req
 | GET | `/comment/{id}` | Comments that went out |
 | GET | `/activities/{type}/{uuid}` | Every activity that was sent |
 
-`mount( app, ap, options )` options: `maxInboxBytes` (default 262144), `deliveryIntervalMs` (default 5000; `0` to schedule the delivery worker yourself with `ap.processDeliveries()`), `threadIntervalMs` (default 1800000; `0` to run `ap.fetchThreads()` yourself).
+`mount( app, ap, options )` options: `maxInboxBytes` (default 262144), `inboxRateLimit` (inbox POSTs per client IP per minute, default 120; `0` for none), `deliveryIntervalMs` (default 5000; `0` to schedule the delivery worker yourself with `ap.processDeliveries()`), `threadIntervalMs` (default 1800000; `0` to run `ap.fetchThreads()` yourself).
 
 ## Settings
 
@@ -253,6 +253,8 @@ Passed to `new ActivityPub( host, settings )`:
 
 - Every incoming activity the module acts on must carry a valid HTTP Signature from the activity's own actor, with a matching `Digest` and a recent `Date`. Anything it doesn't act on is acknowledged without fetching anything. The `Host` is checked against your configured base URL, so a tunnel or proxy that rewrites it can't break verification.
 - Outgoing requests go only to HTTPS URLs on public addresses, and a remote account's inboxes must be on its own host, so a hostile account can't aim your server at internal or third-party URLs.
+- The inbox allows 120 POSTs per client IP per minute (`inboxRateLimit`), and an actor whose key couldn't be fetched isn't fetched again for 5 minutes, so junk requests can't make your server fetch URLs on demand. The limit keys on `req.ip`: behind a proxy or CDN, set BoxExpress's `trust proxy` or `trust proxy header` first, or every request shares the proxy's address.
+- Rejections tell the sender why in general terms; details such as the signature's signing string go only to your `activitypub` log. Inbox bodies are never logged, even at debug level: they can be followers-only replies or direct messages.
 - Private keys are stored in the `ApActorKey` table. Encrypt the database at rest if it's shared with anything else.
 
 ## Delivery

@@ -76,6 +76,29 @@ class extends="testbox.system.BaseSpec" {
 			} );
 
 		} );
+
+		describe( "RemoteActors.fetchAndStore", () => {
+
+			it( "fails fast for an actor that failed recently, without fetching again", () => {
+				var http   = createEmptyMock( "models.HttpClient" ).$( "signedGet", { status : 404, body : "", contentType : "" } );
+				var actors = createEmptyMock( "models.Actors" ).$( "instanceSigner", { keyId : "k", privateKeyPem : "p" } );
+				var remote = new models.RemoteActors( http, actors, "unused" );
+				expect( () => remote.fetchAndStore( "https://junk.example/users/1" ) ).toThrow( regex = "returned 404" );
+				expect( () => remote.fetchAndStore( "https://junk.example/users/1" ) ).toThrow( regex = "failed recently" );
+				expect( () => remote.forKeyId( "https://junk.example/users/1##main-key", true ) ).toThrow( regex = "failed recently" );
+				expect( http.$count( "signedGet" ) ).toBe( 1 );
+			} );
+
+			it( "tries again once the failure has aged out", () => {
+				var http   = createEmptyMock( "models.HttpClient" ).$( "signedGet", { status : 404, body : "", contentType : "" } );
+				var actors = createEmptyMock( "models.Actors" ).$( "instanceSigner", { keyId : "k", privateKeyPem : "p" } );
+				var remote = new models.RemoteActors( httpClient = http, actors = actors, datasource = "unused", failureTtlSeconds = 0 );
+				expect( () => remote.fetchAndStore( "https://junk.example/users/1" ) ).toThrow( regex = "returned 404" );
+				expect( () => remote.fetchAndStore( "https://junk.example/users/1" ) ).toThrow( regex = "returned 404" );
+				expect( http.$count( "signedGet" ) ).toBe( 2 );
+			} );
+
+		} );
 	}
 
 }

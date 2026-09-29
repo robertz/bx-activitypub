@@ -22,7 +22,7 @@
  */
 class {
 
-	variables.VERSION = "0.6.0";
+	variables.VERSION = "0.6.1";
 
 	function init( required host, required struct settings ) {
 		if ( !len( settings.datasource ?: "" ) ) {

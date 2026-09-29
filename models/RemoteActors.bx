@@ -4,14 +4,23 @@
  *
  * Returned shape: { id, actorUrl, inboxUrl, sharedInboxUrl, publicKeyId, publicKeyPem,
  * name, handle, profileUrl, avatarUrl, fromCache }. handle is "@user@host".
+ *
+ * A failed fetch is remembered for failureTtlSeconds, and the same actor URL fails fast
+ * until then: the inbox fetches the key of whatever actor a request claims, so without
+ * this every forged or junk request would cost an outgoing fetch.
  */
 class {
 
-	function init( required httpClient, required actors, required string datasource, numeric ttlSeconds = 86400 ) {
-		variables.http       = arguments.httpClient;
-		variables.actors     = arguments.actors;
-		variables.datasource = arguments.datasource;
-		variables.ttlSeconds = arguments.ttlSeconds;
+	// Past this many remembered failures the list is cleared rather than grown.
+	variables.MAX_REMEMBERED_FAILURES = 10000;
+
+	function init( required httpClient, required actors, required string datasource, numeric ttlSeconds = 86400, numeric failureTtlSeconds = 300 ) {
+		variables.http              = arguments.httpClient;
+		variables.actors            = arguments.actors;
+		variables.datasource        = arguments.datasource;
+		variables.ttlSeconds        = arguments.ttlSeconds;
+		variables.failureTtlSeconds = arguments.failureTtlSeconds;
+		variables.failures          = createObject( "java", "java.util.concurrent.ConcurrentHashMap" ).init();
 		return this;
 	}
 
@@ -42,6 +51,24 @@ class {
 	}
 
 	struct function fetchAndStore( required string actorUrl ) {
+		var failedAt = variables.failures.get( actorUrl );
+		if ( !isNull( failedAt ) && getTickCount() - failedAt < variables.failureTtlSeconds * 1000 ) {
+			throw( type = "BxActivityPub.RemoteFetchFailed", message = "#actorUrl# failed recently; not retrying yet" );
+		}
+		try {
+			var stored = fetchAndStoreNow( actorUrl );
+		} catch ( any e ) {
+			if ( variables.failures.size() >= variables.MAX_REMEMBERED_FAILURES ) {
+				variables.failures.clear();
+			}
+			variables.failures.put( actorUrl, getTickCount() );
+			rethrow;
+		}
+		variables.failures.remove( actorUrl );
+		return stored;
+	}
+
+	private struct function fetchAndStoreNow( required string actorUrl ) {
 		var signer   = variables.actors.instanceSigner();
 		var response = variables.http.signedGet( actorUrl, signer.keyId, signer.privateKeyPem );
 		if ( response.status < 200 || response.status > 299 ) {
